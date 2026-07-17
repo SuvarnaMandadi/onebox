@@ -46,6 +46,28 @@ func (s *Server) Router() http.Handler {
 			r.Post("/signup", s.handleAdminSignup)
 			r.Post("/login", s.handleAdminLogin)
 		})
+
+		r.Route("/collections", func(r chi.Router) {
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireAdminAuth)
+				r.Post("/", s.handleCreateCollection)
+				r.Get("/", s.handleListCollections)
+				r.Get("/{name}", s.handleGetCollection)
+				r.Delete("/{name}", s.handleDeleteCollection)
+			})
+
+			r.Route("/{name}/records", func(r chi.Router) {
+				r.Use(s.optionalAuth)
+				r.Use(s.loadCollection)
+				r.Get("/", s.handleListRecords)
+				r.Post("/", s.handleCreateRecord)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", s.handleGetRecord)
+					r.Patch("/", s.handleUpdateRecord)
+					r.Delete("/", s.handleDeleteRecord)
+				})
+			})
+		})
 	})
 
 	return r
