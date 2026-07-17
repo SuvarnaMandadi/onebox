@@ -11,19 +11,42 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"onebox/internal/config"
+	"onebox/internal/embeddings"
+	"onebox/internal/llm"
 	"onebox/internal/webui"
 )
 
 // Server holds shared dependencies for HTTP handlers.
 type Server struct {
-	cfg config.Config
-	db  *sql.DB
-	hub *realtimeHub
+	cfg               config.Config
+	db                *sql.DB
+	hub               *realtimeHub
+	embeddingProvider embeddings.Provider
+	llmClient         llm.ChatClient
 }
 
-// New builds a Server and its router.
+// New builds a Server and its router. The embedding/LLM clients are left
+// nil when unconfigured (no API key), so a self-hoster who hasn't set up
+// RAG yet gets a clear per-request error instead of a broken client.
 func New(cfg config.Config, sqlDB *sql.DB) *Server {
-	return &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub()}
+	s := &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub()}
+	s.embeddingProvider = buildEmbeddingProvider(cfg)
+	if cfg.AnthropicAPIKey != "" {
+		s.llmClient = llm.NewAnthropicClient("", cfg.AnthropicAPIKey, cfg.AnthropicModel)
+	}
+	return s
+}
+
+func buildEmbeddingProvider(cfg config.Config) embeddings.Provider {
+	switch cfg.EmbeddingProvider {
+	case "ollama":
+		return embeddings.NewOllamaProvider(cfg.EmbeddingBaseURL, cfg.EmbeddingModel)
+	default:
+		if cfg.EmbeddingAPIKey == "" {
+			return nil
+		}
+		return embeddings.NewOpenAIProvider(cfg.EmbeddingBaseURL, cfg.EmbeddingAPIKey, cfg.EmbeddingModel)
+	}
 }
 
 // Router builds the chi router with middleware and all routes mounted.
@@ -58,6 +81,16 @@ func (s *Server) Router() http.Handler {
 			r.With(s.requireAdminAuth).Get("/", s.handleListFiles)
 			r.With(s.optionalAuth).Get("/{id}", s.handleServeFile)
 			r.With(s.optionalAuth).Delete("/{id}", s.handleDeleteFile)
+		})
+
+		r.Route("/rag", func(r chi.Router) {
+			r.Route("/sources", func(r chi.Router) {
+				r.With(s.requireAnyAuth).Post("/", s.handleCreateRAGSource)
+				r.With(s.optionalAuth).Get("/{id}", s.handleGetRAGSource)
+				r.With(s.optionalAuth).Delete("/{id}", s.handleDeleteRAGSource)
+			})
+			r.With(s.requireAnyAuth).Post("/query", s.handleRAGQuery)
+			r.With(s.requireAnyAuth).Post("/answer", s.handleRAGAnswer)
 		})
 
 		r.Route("/collections", func(r chi.Router) {

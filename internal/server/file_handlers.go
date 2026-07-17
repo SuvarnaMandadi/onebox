@@ -163,7 +163,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to delete file record", nil)
 		return
 	}
-	_ = os.Remove(filepath.Join(s.cfg.FilesDir, rec.ID))
+	removeStoredFile(s.cfg.FilesDir, rec.ID)
 
 	w.WriteHeader(http.StatusNoContent)
 }

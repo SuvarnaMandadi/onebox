@@ -39,8 +39,21 @@ for the pitch and scope.
 
 ## Month 3 — the AI core (differentiator)
 
-- **Week 9**: Bundle sqlite-vec; embedding adapter interface; OpenAI-compatible
-  + Ollama embedding providers.
+> **Decision**: skipped sqlite-vec. It's a C extension, and
+> `modernc.org/sqlite` (our pure-Go driver, chosen in Week 1 for
+> cross-compiling to Win/Mac/Linux from one machine with no cgo) is a
+> from-scratch Go reimplementation, not a wrapper around real SQLite — it
+> can't load C extensions at all. Switching to `mattn/go-sqlite3` (cgo)
+> would restore sqlite-vec but break the one-command cross-compile story
+> from Week 1, requiring a C cross-toolchain (e.g. zig cc) per target OS.
+> Instead: embeddings are stored as BLOBs in a plain `_rag_chunks` table
+> and cosine similarity is computed in Go at query time (brute-force scan).
+> Fine at the scale onebox targets (a handful of documents per user); a
+> real ANN index can replace this later without changing the API, the same
+> way replication was deferred to v1.x.
+
+- **Week 9**: Embedding adapter interface; OpenAI-compatible + Ollama
+  embedding providers. (No sqlite-vec — see decision above.)
 - **Week 10**: Ingestion pipeline: PDF/TXT/MD extraction, chunking (~500
   tokens with overlap), async worker, status tracking.
 - **Week 11**: `/api/rag/query` with cosine similarity top-k; relevance

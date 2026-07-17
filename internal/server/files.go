@@ -35,6 +35,12 @@ func storeFileContent(filesDir string, content []byte) (id string, err error) {
 	return id, nil
 }
 
+// removeStoredFile deletes a stored file's content from disk, ignoring a
+// missing file (already gone is not an error for a delete path).
+func removeStoredFile(filesDir, id string) {
+	_ = os.Remove(filepath.Join(filesDir, id))
+}
+
 func createFileRecord(ctx context.Context, sqlDB *sql.DB, id, ownerID, filename, mime string, size int64) (*fileRecord, error) {
 	_, err := sqlDB.ExecContext(ctx,
 		`INSERT INTO _files (id, owner_id, filename, path, size, mime) VALUES (?, ?, ?, ?, ?, ?)`,

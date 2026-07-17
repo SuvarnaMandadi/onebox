@@ -24,6 +24,18 @@ type Config struct {
 	JWTSecret string
 	// MaxUploadSize is the largest file, in bytes, /api/files will accept.
 	MaxUploadSize int64
+
+	// EmbeddingProvider selects the RAG engine's embedding backend:
+	// "openai" (or any OpenAI-compatible endpoint) or "ollama".
+	EmbeddingProvider string
+	EmbeddingBaseURL  string
+	EmbeddingAPIKey   string
+	EmbeddingModel    string
+
+	// AnthropicAPIKey/Model back /api/rag/answer's LLM call. The full
+	// multi-provider gateway (Month 4) will supersede this.
+	AnthropicAPIKey string
+	AnthropicModel  string
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -46,6 +58,14 @@ func Load() Config {
 		FilesDir:      filepath.Join(dataDir, "files"),
 		JWTSecret:     secret,
 		MaxUploadSize: maxUpload,
+
+		EmbeddingProvider: getEnv("ONEBOX_EMBEDDING_PROVIDER", "openai"),
+		EmbeddingBaseURL:  os.Getenv("ONEBOX_EMBEDDING_BASE_URL"),
+		EmbeddingAPIKey:   os.Getenv("ONEBOX_EMBEDDING_API_KEY"),
+		EmbeddingModel:    getEnv("ONEBOX_EMBEDDING_MODEL", "text-embedding-3-small"),
+
+		AnthropicAPIKey: os.Getenv("ONEBOX_ANTHROPIC_API_KEY"),
+		AnthropicModel:  getEnv("ONEBOX_ANTHROPIC_MODEL", "claude-sonnet-5"),
 	}
 }
 
