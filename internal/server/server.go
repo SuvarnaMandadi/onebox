@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"onebox/internal/config"
+	"onebox/internal/webui"
 )
 
 // Server holds shared dependencies for HTTP handlers.
@@ -35,6 +36,8 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
+	r.Mount("/_/", http.StripPrefix("/_/", webui.Handler()))
+
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", s.handleHealth)
 
@@ -52,6 +55,7 @@ func (s *Server) Router() http.Handler {
 
 		r.Route("/files", func(r chi.Router) {
 			r.With(s.requireAnyAuth).Post("/", s.handleUploadFile)
+			r.With(s.requireAdminAuth).Get("/", s.handleListFiles)
 			r.With(s.optionalAuth).Get("/{id}", s.handleServeFile)
 			r.With(s.optionalAuth).Delete("/{id}", s.handleDeleteFile)
 		})

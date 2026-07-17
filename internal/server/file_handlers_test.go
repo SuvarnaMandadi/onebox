@@ -87,6 +87,45 @@ func TestUploadFile(t *testing.T) {
 	}
 }
 
+func TestListFiles(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+	_, userToken := signupUser(t, srv, "uploader@example.com")
+	adminToken := bootstrapAdmin(t, srv)
+
+	for _, name := range []string{"a.txt", "b.txt"} {
+		req := multipartUploadRequest(t, "/api/files", "file", name, []byte("content of "+name))
+		req.Header.Set("Authorization", "Bearer "+userToken)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("upload %s failed: status = %d, body = %s", name, rec.Code, rec.Body.String())
+		}
+	}
+
+	t.Run("admin can list", func(t *testing.T) {
+		rec := doAuth(t, srv, http.MethodGet, "/api/files", adminToken, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Items []fileRecord `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if len(resp.Items) != 2 {
+			t.Fatalf("got %d items, want 2", len(resp.Items))
+		}
+	})
+
+	t.Run("non-admin rejected", func(t *testing.T) {
+		rec := doAuth(t, srv, http.MethodGet, "/api/files", userToken, nil)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestServeAndDeleteFile(t *testing.T) {
 	srv := newTestServerWithFiles(t)
 	_, ownerToken := signupUser(t, srv, "owner@example.com")

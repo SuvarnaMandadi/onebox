@@ -59,6 +59,37 @@ func getFileByID(ctx context.Context, sqlDB *sql.DB, id string) (*fileRecord, er
 	return &f, nil
 }
 
+// listFiles returns up to limit+1 files (the extra row signals whether a
+// next page exists), newest first, for the admin dashboard's file browser.
+func listFiles(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cursorID string) ([]*fileRecord, error) {
+	stmt := `SELECT id, owner_id, filename, size, mime, created FROM _files`
+	args := []any{}
+	if cursorCreated != "" {
+		stmt += ` WHERE (created, id) < (?, ?)`
+		args = append(args, cursorCreated, cursorID)
+	}
+	stmt += ` ORDER BY created DESC, id DESC LIMIT ?`
+	args = append(args, limit+1)
+
+	rows, err := sqlDB.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list files: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*fileRecord
+	for rows.Next() {
+		var f fileRecord
+		var owner sql.NullString
+		if err := rows.Scan(&f.ID, &owner, &f.Filename, &f.Size, &f.Mime, &f.Created); err != nil {
+			return nil, fmt.Errorf("scan file row: %w", err)
+		}
+		f.OwnerID = owner.String
+		out = append(out, &f)
+	}
+	return out, rows.Err()
+}
+
 func deleteFileRecord(ctx context.Context, sqlDB *sql.DB, id string) error {
 	res, err := sqlDB.ExecContext(ctx, `DELETE FROM _files WHERE id = ?`, id)
 	if err != nil {

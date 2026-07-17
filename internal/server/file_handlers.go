@@ -67,6 +67,52 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, rec)
 }
 
+// handleListFiles is admin-only: it powers the dashboard's file browser.
+// Regular users have no use case for a global file listing in v0.1 (they
+// know the ids of files they uploaded).
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
+	limit := defaultLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
+	var cursorCreated, cursorID string
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		created, id, ok := decodeCursor(cursor)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid_query", "cursor is malformed", nil)
+			return
+		}
+		cursorCreated, cursorID = created, id
+	}
+
+	files, err := listFiles(r.Context(), s.db, limit, cursorCreated, cursorID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to list files", nil)
+		return
+	}
+
+	hasMore := len(files) > limit
+	if hasMore {
+		files = files[:limit]
+	}
+	var nextCursor string
+	if hasMore && len(files) > 0 {
+		last := files[len(files)-1]
+		nextCursor = encodeCursor(last.Created, last.ID)
+	}
+	if files == nil {
+		files = []*fileRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": files, "nextCursor": nextCursor})
+}
+
 func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
