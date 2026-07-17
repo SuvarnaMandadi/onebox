@@ -183,6 +183,7 @@ func (s *Server) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to create record", nil)
 		return
 	}
+	s.hub.publish(realtimeEvent{Action: "create", Collection: c.Name, Record: rec}, c.Rules.View, ownerIDOf(rec))
 	writeJSON(w, http.StatusCreated, rec)
 }
 
@@ -241,6 +242,7 @@ func (s *Server) handleUpdateRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to update record", nil)
 		return
 	}
+	s.hub.publish(realtimeEvent{Action: "update", Collection: c.Name, Record: rec}, c.Rules.View, ownerIDOf(rec))
 	writeJSON(w, http.StatusOK, rec)
 }
 
@@ -266,5 +268,6 @@ func (s *Server) handleDeleteRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to delete record", nil)
 		return
 	}
+	s.hub.publish(realtimeEvent{Action: "delete", Collection: c.Name, Record: existing}, c.Rules.View, ownerIDOf(existing))
 	w.WriteHeader(http.StatusNoContent)
 }

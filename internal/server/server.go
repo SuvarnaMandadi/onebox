@@ -17,11 +17,12 @@ import (
 type Server struct {
 	cfg config.Config
 	db  *sql.DB
+	hub *realtimeHub
 }
 
 // New builds a Server and its router.
 func New(cfg config.Config, sqlDB *sql.DB) *Server {
-	return &Server{cfg: cfg, db: sqlDB}
+	return &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub()}
 }
 
 // Router builds the chi router with middleware and all routes mounted.
@@ -46,6 +47,8 @@ func (s *Server) Router() http.Handler {
 			r.Post("/signup", s.handleAdminSignup)
 			r.Post("/login", s.handleAdminLogin)
 		})
+
+		r.With(s.realtimeAuth).Get("/realtime", s.handleRealtime)
 
 		r.Route("/files", func(r chi.Router) {
 			r.With(s.requireAnyAuth).Post("/", s.handleUploadFile)
