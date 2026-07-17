@@ -47,6 +47,12 @@ func (s *Server) Router() http.Handler {
 			r.Post("/login", s.handleAdminLogin)
 		})
 
+		r.Route("/files", func(r chi.Router) {
+			r.With(s.requireAnyAuth).Post("/", s.handleUploadFile)
+			r.With(s.optionalAuth).Get("/{id}", s.handleServeFile)
+			r.With(s.optionalAuth).Delete("/{id}", s.handleDeleteFile)
+		})
+
 		r.Route("/collections", func(r chi.Router) {
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireAdminAuth)

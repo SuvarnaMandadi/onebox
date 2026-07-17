@@ -57,6 +57,38 @@ func (s *Server) requireAdminAuth(next http.Handler) http.Handler {
 	})
 }
 
+// requireAnyAuth accepts either a _users or _admins session token and
+// stores whichever subject it found in the request context. Used for
+// endpoints like file upload where any signed-in identity may act, but the
+// specific rule (owner vs admin) is decided later per-resource.
+func (s *Server) requireAnyAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenStr := bearerToken(r)
+		if tokenStr == "" {
+			writeError(w, http.StatusUnauthorized, "missing_token", "Authorization: Bearer <token> header is required", nil)
+			return
+		}
+
+		claims, err := auth.ParseToken(s.cfg.JWTSecret, tokenStr)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid_token", "session token is invalid or expired", nil)
+			return
+		}
+
+		var ctx context.Context
+		switch claims.Type {
+		case auth.SubjectUser:
+			ctx = context.WithValue(r.Context(), ctxKeyAuthUserID, claims.Subject)
+		case auth.SubjectAdmin:
+			ctx = context.WithValue(r.Context(), ctxKeyAuthAdminID, claims.Subject)
+		default:
+			writeError(w, http.StatusUnauthorized, "invalid_token", "session token is invalid or expired", nil)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
