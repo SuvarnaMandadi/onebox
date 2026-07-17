@@ -41,6 +41,11 @@ func (s *Server) Router() http.Handler {
 			r.Post("/signup", s.handleSignup)
 			r.Post("/login", s.handleLogin)
 		})
+
+		r.Route("/admins", func(r chi.Router) {
+			r.Post("/signup", s.handleAdminSignup)
+			r.Post("/login", s.handleAdminLogin)
+		})
 	})
 
 	return r
