@@ -22,31 +22,44 @@ type Server struct {
 	db                *sql.DB
 	hub               *realtimeHub
 	embeddingProvider embeddings.Provider
-	llmClient         llm.ChatClient
+	llmRouter         *llm.Router
+	chatCache         *chatCache
+	rateLimiter       *rateLimiter
 }
 
-// New builds a Server and its router. The embedding/LLM clients are left
-// nil when unconfigured (no API key), so a self-hoster who hasn't set up
-// RAG yet gets a clear per-request error instead of a broken client.
+// New builds a Server and its router. Provider sub-clients are left nil
+// when unconfigured (no API key), so a self-hoster who hasn't set one up
+// gets a clear per-request error instead of a broken client.
 func New(cfg config.Config, sqlDB *sql.DB) *Server {
 	s := &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub()}
 	s.embeddingProvider = buildEmbeddingProvider(cfg)
-	if cfg.AnthropicAPIKey != "" {
-		s.llmClient = llm.NewAnthropicClient("", cfg.AnthropicAPIKey, cfg.AnthropicModel)
-	}
+	s.llmRouter = buildLLMRouter(cfg)
+	s.chatCache = newChatCache()
+	s.rateLimiter = newRateLimiter(cfg.RateLimitPerMinute)
 	return s
 }
 
 func buildEmbeddingProvider(cfg config.Config) embeddings.Provider {
 	switch cfg.EmbeddingProvider {
 	case "ollama":
-		return embeddings.NewOllamaProvider(cfg.EmbeddingBaseURL, cfg.EmbeddingModel)
+		return embeddings.NewOllamaProvider(cfg.OllamaBaseURL, cfg.EmbeddingModel)
 	default:
 		if cfg.EmbeddingAPIKey == "" {
 			return nil
 		}
 		return embeddings.NewOpenAIProvider(cfg.EmbeddingBaseURL, cfg.EmbeddingAPIKey, cfg.EmbeddingModel)
 	}
+}
+
+func buildLLMRouter(cfg config.Config) *llm.Router {
+	router := &llm.Router{Ollama: llm.NewOllamaClient(cfg.OllamaBaseURL)}
+	if cfg.AnthropicAPIKey != "" {
+		router.Anthropic = llm.NewAnthropicClient("", cfg.AnthropicAPIKey)
+	}
+	if cfg.OpenAIChatAPIKey != "" {
+		router.OpenAI = llm.NewOpenAIClient(cfg.OpenAIChatBaseURL, cfg.OpenAIChatAPIKey)
+	}
+	return router
 }
 
 // Router builds the chi router with middleware and all routes mounted.
@@ -92,6 +105,9 @@ func (s *Server) Router() http.Handler {
 			r.With(s.requireAnyAuth).Post("/query", s.handleRAGQuery)
 			r.With(s.requireAnyAuth).Post("/answer", s.handleRAGAnswer)
 		})
+
+		r.With(s.requireAnyAuth).Post("/llm/chat", s.handleLLMChat)
+		r.With(s.requireAnyAuth).Get("/usage", s.handleUsage)
 
 		r.Route("/collections", func(r chi.Router) {
 			r.Group(func(r chi.Router) {

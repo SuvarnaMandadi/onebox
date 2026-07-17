@@ -11,6 +11,7 @@ import (
 
 	"onebox/internal/config"
 	"onebox/internal/db"
+	"onebox/internal/llm"
 )
 
 // fakeEmbeddingProvider embeds text as a bag-of-words vector over a fixed
@@ -38,13 +39,31 @@ func (f *fakeEmbeddingProvider) Embed(ctx context.Context, texts []string) ([][]
 	return out, nil
 }
 
+// fakeLLMClient implements llm.Provider without calling a real API. It's
+// installed as the router's Anthropic backend, since RAG's answer
+// endpoint defaults to cfg.AnthropicModel (routes to "anthropic").
 type fakeLLMClient struct {
 	lastSystem, lastUser string
 }
 
-func (f *fakeLLMClient) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-	f.lastSystem, f.lastUser = systemPrompt, userPrompt
-	return "fake answer", nil
+func (f *fakeLLMClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResult, error) {
+	for _, m := range req.Messages {
+		switch m.Role {
+		case "system":
+			f.lastSystem = m.Content
+		case "user":
+			f.lastUser = m.Content
+		}
+	}
+	return llm.ChatResult{Content: "fake answer", TokensIn: 10, TokensOut: 5}, nil
+}
+
+func (f *fakeLLMClient) ChatStream(ctx context.Context, req llm.ChatRequest, onDelta func(string)) (llm.ChatResult, error) {
+	result, err := f.Chat(ctx, req)
+	if err == nil {
+		onDelta(result.Content)
+	}
+	return result, err
 }
 
 // newRAGTestServer is like newTestServer but wires in fake embedding/LLM
@@ -60,10 +79,10 @@ func newRAGTestServer(t *testing.T) (*Server, *fakeLLMClient) {
 	}
 	t.Cleanup(func() { sqlDB.Close() })
 
-	srv := New(config.Config{JWTSecret: "test-secret", FilesDir: t.TempDir(), MaxUploadSize: 1 << 20}, sqlDB)
+	srv := New(config.Config{JWTSecret: "test-secret", FilesDir: t.TempDir(), MaxUploadSize: 1 << 20, AnthropicModel: "claude-sonnet-5"}, sqlDB)
 	srv.embeddingProvider = newFakeEmbeddingProvider()
 	llmClient := &fakeLLMClient{}
-	srv.llmClient = llmClient
+	srv.llmRouter.Anthropic = llmClient
 	return srv, llmClient
 }
 

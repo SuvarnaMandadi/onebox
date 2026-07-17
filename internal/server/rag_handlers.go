@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"onebox/internal/llm"
 )
 
 func (s *Server) handleCreateRAGSource(w http.ResponseWriter, r *http.Request) {
@@ -193,11 +195,6 @@ func (s *Server) handleRAGAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body", "expected {\"query\": \"...\"}", nil)
 		return
 	}
-	if s.llmClient == nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "no LLM configured (set ONEBOX_ANTHROPIC_API_KEY)", nil)
-		return
-	}
-
 	chunks, err := s.retrieveTopChunks(r, req.Query, req.TopK)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
@@ -211,13 +208,20 @@ func (s *Server) handleRAGAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, err := s.llmClient.Complete(r.Context(), ragSystemPrompt, buildRAGPrompt(req.Query, chunks))
+	result, err := s.llmRouter.Chat(r.Context(), llm.ChatRequest{
+		Model: s.cfg.AnthropicModel,
+		Messages: []llm.Message{
+			{Role: "system", Content: ragSystemPrompt},
+			{Role: "user", Content: buildRAGPrompt(req.Query, chunks)},
+		},
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "LLM call failed: "+err.Error(), nil)
 		return
 	}
+	s.logUsage(r.Context(), "anthropic", s.cfg.AnthropicModel, result.TokensIn, result.TokensOut, false)
 
-	writeJSON(w, http.StatusOK, ragAnswerResponse{Answer: answer, Sources: chunks})
+	writeJSON(w, http.StatusOK, ragAnswerResponse{Answer: result.Content, Sources: chunks})
 }
 
 const ragSystemPrompt = "You are a helpful assistant. Answer the user's question using only the " +

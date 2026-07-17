@@ -32,10 +32,27 @@ type Config struct {
 	EmbeddingAPIKey   string
 	EmbeddingModel    string
 
-	// AnthropicAPIKey/Model back /api/rag/answer's LLM call. The full
-	// multi-provider gateway (Month 4) will supersede this.
+	// AnthropicAPIKey backs the Anthropic branch of the LLM gateway (and
+	// is what /api/rag/answer uses by default, via AnthropicModel).
 	AnthropicAPIKey string
 	AnthropicModel  string
+
+	// OpenAIChatAPIKey/BaseURL back the OpenAI branch of the LLM gateway.
+	// Kept separate from Embedding* since a self-hoster may use different
+	// keys (or providers entirely) for chat vs. embeddings.
+	OpenAIChatAPIKey  string
+	OpenAIChatBaseURL string
+
+	// OllamaBaseURL backs the Ollama branch of the LLM gateway, and is
+	// reused for embeddings when EmbeddingProvider is "ollama" — it's the
+	// same local daemon either way.
+	OllamaBaseURL string
+
+	// RateLimitPerMinute caps chat requests per user per minute.
+	RateLimitPerMinute int
+	// MonthlySpendCapUSD caps a user's estimated monthly LLM spend; 0
+	// means unlimited.
+	MonthlySpendCapUSD float64
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -66,7 +83,33 @@ func Load() Config {
 
 		AnthropicAPIKey: os.Getenv("ONEBOX_ANTHROPIC_API_KEY"),
 		AnthropicModel:  getEnv("ONEBOX_ANTHROPIC_MODEL", "claude-sonnet-5"),
+
+		OpenAIChatAPIKey:  os.Getenv("ONEBOX_OPENAI_API_KEY"),
+		OpenAIChatBaseURL: os.Getenv("ONEBOX_OPENAI_BASE_URL"),
+
+		OllamaBaseURL: getEnv("ONEBOX_OLLAMA_BASE_URL", "http://localhost:11434"),
+
+		RateLimitPerMinute: getEnvInt("ONEBOX_RATE_LIMIT_PER_MINUTE", 20),
+		MonthlySpendCapUSD: getEnvFloat("ONEBOX_MONTHLY_SPEND_CAP_USD", 5.0),
 	}
+}
+
+func getEnvInt(key string, fallback int) int {
+	if raw := os.Getenv(key); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if raw := os.Getenv(key); raw != "" {
+		if f, err := strconv.ParseFloat(raw, 64); err == nil {
+			return f
+		}
+	}
+	return fallback
 }
 
 func getEnv(key, fallback string) string {
