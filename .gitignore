@@ -4,5 +4,5 @@
 *.db-shm
 *.db-wal
 .env
-onebox
-onebox.exe
+/onebox
+/onebox.exe
