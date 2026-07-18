@@ -16,7 +16,15 @@ import (
 	"onebox/internal/server"
 )
 
+// version is set at build time via -ldflags "-X main.version=...", see
+// scripts/build-release.sh.
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		log.Println("onebox " + version)
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}
@@ -24,6 +32,7 @@ func main() {
 
 func run() error {
 	cfg := config.Load()
+	log.Printf("onebox %s starting", version)
 
 	sqlDB, err := db.Open(cfg.DBPath)
 	if err != nil {

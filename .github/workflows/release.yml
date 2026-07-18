@@ -1,0 +1,27 @@
+name: Release
+
+# Builds cross-platform binaries and opens a DRAFT GitHub release for
+# review — pushing a tag never auto-publishes anything public. A human
+# still has to click "Publish release" in the GitHub UI.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go test ./...
+      - run: ./scripts/build-release.sh "${GITHUB_REF_NAME#v}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dist/*
+          generate_release_notes: true

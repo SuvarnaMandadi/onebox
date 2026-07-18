@@ -63,4 +63,4 @@ anti-scope list and rationale.
 
 ## License
 
-TBD (MIT or Apache-2.0) — to be finalized before public launch.
+[MIT](LICENSE).

@@ -81,7 +81,7 @@ for the pitch and scope.
 
 ## Month 6 — launch
 
-- Public GitHub release (license TBD), binaries for Mac/Linux/Windows,
+- Public GitHub release (MIT license), binaries for Mac/Linux/Windows,
   Docker image.
 - Launch posts: Hacker News (Show HN), Product Hunt, r/selfhosted,
   r/LocalLLaMA, dev.to. A 90-second demo video is the highest-leverage asset.
