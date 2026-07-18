@@ -7,19 +7,31 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header id="topbar" class="hidden">
-    <div class="brand">onebox</div>
-    <nav>
-      <a href="#/collections">Collections</a>
-      <a href="#/files">Files</a>
-      <a href="#/rag">RAG sources</a>
-      <a href="#/usage">Usage</a>
-      <a href="#/settings">Settings</a>
-    </nav>
-    <button id="logoutBtn">Log out</button>
-  </header>
+  <div id="shell" class="hidden">
+    <aside id="sidebar">
+      <div class="brand">
+        <span class="brand-mark">◆</span> onebox
+      </div>
+      <nav>
+        <a href="#/collections" data-route="collections">Collections</a>
+        <a href="#/files" data-route="files">Files</a>
+        <a href="#/rag" data-route="rag">RAG sources</a>
+        <a href="#/usage" data-route="usage">Usage</a>
+        <a href="#/settings" data-route="settings">Settings</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="themeToggle" class="btn-ghost" type="button" title="Toggle light/dark theme">🌓 Theme</button>
+        <button id="logoutBtn" class="btn-ghost" type="button">Log out</button>
+      </div>
+    </aside>
 
-  <main id="app"></main>
+    <main id="app"></main>
+  </div>
+
+  <div id="loginRoot"></div>
+
+  <div id="toasts" aria-live="polite"></div>
+  <div id="modalRoot"></div>
 
   <script src="app.js"></script>
 </body>
