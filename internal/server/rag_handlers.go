@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -63,9 +64,54 @@ func (s *Server) handleCreateRAGSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go ingestSource(s.db, s.embeddingProvider, ownerID, src, content)
+	go ingestSource(s.db, s.providers.Load().embedding, ownerID, src, content)
 
 	writeJSON(w, http.StatusAccepted, src)
+}
+
+// handleListRAGSources is admin-only: it powers the dashboard's RAG
+// source manager.
+func (s *Server) handleListRAGSources(w http.ResponseWriter, r *http.Request) {
+	limit := defaultLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
+	var cursorCreated, cursorID string
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		created, id, ok := decodeCursor(cursor)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid_query", "cursor is malformed", nil)
+			return
+		}
+		cursorCreated, cursorID = created, id
+	}
+
+	sources, err := listRAGSources(r.Context(), s.db, limit, cursorCreated, cursorID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to list rag sources", nil)
+		return
+	}
+
+	hasMore := len(sources) > limit
+	if hasMore {
+		sources = sources[:limit]
+	}
+	var nextCursor string
+	if hasMore && len(sources) > 0 {
+		last := sources[len(sources)-1]
+		nextCursor = encodeCursor(last.Created, last.ID)
+	}
+	if sources == nil {
+		sources = []*ragSource{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": sources, "nextCursor": nextCursor})
 }
 
 func (s *Server) handleGetRAGSource(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +173,8 @@ const maxTopK = 20
 // the top_k highest-cosine-similarity matches. Shared by /query and
 // /answer.
 func (s *Server) retrieveTopChunks(r *http.Request, query string, topK int) ([]ragScoredChunk, error) {
-	if s.embeddingProvider == nil {
+	embeddingProvider := s.providers.Load().embedding
+	if embeddingProvider == nil {
 		return nil, fmt.Errorf("no embedding provider configured")
 	}
 	if topK <= 0 {
@@ -137,7 +184,7 @@ func (s *Server) retrieveTopChunks(r *http.Request, query string, topK int) ([]r
 		topK = maxTopK
 	}
 
-	vectors, err := s.embeddingProvider.Embed(r.Context(), []string{query})
+	vectors, err := embeddingProvider.Embed(r.Context(), []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
@@ -208,7 +255,7 @@ func (s *Server) handleRAGAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.llmRouter.Chat(r.Context(), llm.ChatRequest{
+	result, err := s.providers.Load().llm.Chat(r.Context(), llm.ChatRequest{
 		Model: s.cfg.AnthropicModel,
 		Messages: []llm.Message{
 			{Role: "system", Content: ragSystemPrompt},

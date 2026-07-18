@@ -48,7 +48,9 @@ func newLLMTestServer(t *testing.T, cfg config.Config) (*Server, *countingProvid
 	}
 	srv := New(cfg, sqlDB)
 	provider := &countingProvider{result: llm.ChatResult{Content: "hello from fake", TokensIn: 100, TokensOut: 50}}
-	srv.llmRouter.Anthropic = provider
+	bundle := *srv.providers.Load()
+	bundle.llm = &llm.Router{Anthropic: provider}
+	srv.providers.Store(&bundle)
 	return srv, provider
 }
 

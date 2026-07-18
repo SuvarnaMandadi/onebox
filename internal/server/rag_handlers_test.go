@@ -80,9 +80,11 @@ func newRAGTestServer(t *testing.T) (*Server, *fakeLLMClient) {
 	t.Cleanup(func() { sqlDB.Close() })
 
 	srv := New(config.Config{JWTSecret: "test-secret", FilesDir: t.TempDir(), MaxUploadSize: 1 << 20, AnthropicModel: "claude-sonnet-5"}, sqlDB)
-	srv.embeddingProvider = newFakeEmbeddingProvider()
 	llmClient := &fakeLLMClient{}
-	srv.llmRouter.Anthropic = llmClient
+	srv.providers.Store(&providerBundle{
+		embedding: newFakeEmbeddingProvider(),
+		llm:       &llm.Router{Anthropic: llmClient},
+	})
 	return srv, llmClient
 }
 
@@ -165,6 +167,36 @@ func TestRAGUnsupportedFileType(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestListRAGSources(t *testing.T) {
+	srv, _ := newRAGTestServer(t)
+	_, userToken := signupUser(t, srv, "researcher@example.com")
+	adminToken := bootstrapAdmin(t, srv)
+
+	uploadRAGSource(t, srv, userToken, "a.txt", []byte("content a"))
+	uploadRAGSource(t, srv, userToken, "b.txt", []byte("content b"))
+
+	t.Run("admin can list", func(t *testing.T) {
+		rec := doAuth(t, srv, http.MethodGet, "/api/rag/sources", adminToken, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Items []map[string]any `json:"items"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if len(resp.Items) != 2 {
+			t.Fatalf("got %d items, want 2", len(resp.Items))
+		}
+	})
+
+	t.Run("non-admin rejected", func(t *testing.T) {
+		rec := doAuth(t, srv, http.MethodGet, "/api/rag/sources", userToken, nil)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
 }
 
 func TestRAGSourceOwnership(t *testing.T) {

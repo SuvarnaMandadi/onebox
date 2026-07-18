@@ -58,7 +58,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.llmRouter.Chat(r.Context(), chatReq)
+	result, err := s.providers.Load().llm.Chat(r.Context(), chatReq)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 		return
@@ -83,7 +83,7 @@ func (s *Server) streamLLMChat(w http.ResponseWriter, r *http.Request, req llm.C
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	result, err := s.llmRouter.ChatStream(r.Context(), req, func(delta string) {
+	result, err := s.providers.Load().llm.ChatStream(r.Context(), req, func(delta string) {
 		data, _ := json.Marshal(map[string]string{"delta": delta})
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()

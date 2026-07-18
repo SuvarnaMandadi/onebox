@@ -61,6 +61,38 @@ func setRAGSourceStatus(ctx context.Context, sqlDB *sql.DB, id, status, errMsg s
 	return nil
 }
 
+// listRAGSources returns up to limit+1 sources (the extra row signals
+// whether a next page exists), newest first.
+func listRAGSources(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cursorID string) ([]*ragSource, error) {
+	stmt := `SELECT id, owner_id, file_id, filename, status, chunk_count, error, created, updated FROM _rag_sources`
+	args := []any{}
+	if cursorCreated != "" {
+		stmt += ` WHERE (created, id) < (?, ?)`
+		args = append(args, cursorCreated, cursorID)
+	}
+	stmt += ` ORDER BY created DESC, id DESC LIMIT ?`
+	args = append(args, limit+1)
+
+	rows, err := sqlDB.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list rag sources: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*ragSource
+	for rows.Next() {
+		var s ragSource
+		var owner, errMsg sql.NullString
+		if err := rows.Scan(&s.ID, &owner, &s.FileID, &s.Filename, &s.Status, &s.ChunkCount, &errMsg, &s.Created, &s.Updated); err != nil {
+			return nil, fmt.Errorf("scan rag source row: %w", err)
+		}
+		s.OwnerID = owner.String
+		s.Error = errMsg.String
+		out = append(out, &s)
+	}
+	return out, rows.Err()
+}
+
 // deleteRAGSource removes the source row (cascading to its chunks via the
 // FK) and its underlying file. Callers are responsible for checking
 // ownership before calling this.

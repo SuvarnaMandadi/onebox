@@ -90,8 +90,12 @@ async function navigate() {
       await renderRecords(app, decodeURIComponent(parts[1]));
     } else if (parts[0] === "files") {
       await renderFiles(app);
+    } else if (parts[0] === "rag") {
+      await renderRAGSources(app);
+    } else if (parts[0] === "usage") {
+      await renderUsage(app);
     } else if (parts[0] === "settings") {
-      renderSettings(app);
+      await renderSettings(app);
     } else {
       location.hash = "#/collections";
     }
@@ -477,20 +481,246 @@ async function renderFiles(container) {
   await loadPage();
 }
 
+// -- rag sources -----------------------------------------------------------
+
+async function renderRAGSources(container) {
+  container.appendChild(el("h2", { text: "RAG sources" }));
+
+  const fileInput = el("input", { type: "file", accept: ".pdf,.txt,.md" });
+  const uploadStatus = el("div", { class: "error" });
+  const table = el("table", {}, [
+    el(
+      "thead",
+      {},
+      el("tr", {}, [
+        el("th", { text: "Filename" }),
+        el("th", { text: "Status" }),
+        el("th", { text: "Chunks" }),
+        el("th", { text: "Created" }),
+        el("th", { text: "" }),
+      ])
+    ),
+  ]);
+  const tbody = el("tbody");
+  table.appendChild(tbody);
+
+  function renderRow(src) {
+    const delBtn = el("button", {
+      class: "danger",
+      text: "Delete",
+      onclick: async () => {
+        if (!confirm('Delete "' + src.filename + '"?')) return;
+        await api("/api/rag/sources/" + src.id, { method: "DELETE" });
+        row.remove();
+      },
+    });
+    let statusText = src.status;
+    if (src.status === "error" && src.error) statusText += ": " + src.error;
+    const row = el("tr", { "data-id": src.id }, [
+      el("td", { text: src.filename }),
+      el("td", { class: src.status === "error" ? "error" : "muted", text: statusText }),
+      el("td", { text: String(src.chunk_count) }),
+      el("td", { class: "muted", text: src.created }),
+      el("td", {}, delBtn),
+    ]);
+    return row;
+  }
+
+  const loadMoreBtn = el("button", { class: "secondary", text: "Load more" });
+  let nextCursor = "";
+  async function loadPage() {
+    const qs = new URLSearchParams({ limit: "30" });
+    if (nextCursor) qs.set("cursor", nextCursor);
+    const resp = await api("/api/rag/sources?" + qs.toString());
+    for (const s of resp.items || []) tbody.appendChild(renderRow(s));
+    nextCursor = resp.nextCursor || "";
+    loadMoreBtn.style.display = nextCursor ? "" : "none";
+  }
+  loadMoreBtn.addEventListener("click", loadPage);
+
+  // Ingestion (extract/chunk/embed) runs in the background server-side;
+  // poll the source's status until it leaves pending/processing so the
+  // row updates without a manual refresh.
+  async function pollUntilDone(id) {
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      let src;
+      try {
+        src = await api("/api/rag/sources/" + id);
+      } catch (e) {
+        return;
+      }
+      const row = tbody.querySelector('tr[data-id="' + id + '"]');
+      if (row) row.replaceWith(renderRow(src));
+      if (src.status === "done" || src.status === "error") return;
+    }
+  }
+
+  const uploadBtn = el("button", {
+    text: "Upload & ingest",
+    onclick: async () => {
+      clear(uploadStatus);
+      if (!fileInput.files[0]) return;
+      const form = new FormData();
+      form.append("file", fileInput.files[0]);
+      try {
+        const src = await api("/api/rag/sources", { method: "POST", body: form });
+        tbody.insertBefore(renderRow(src), tbody.firstChild);
+        fileInput.value = "";
+        pollUntilDone(src.id);
+      } catch (e) {
+        uploadStatus.appendChild(document.createTextNode(e.message));
+      }
+    },
+  });
+
+  container.appendChild(
+    el("div", { class: "card" }, [
+      el("div", { class: "row" }, [fileInput, uploadBtn]),
+      el("p", { class: "muted", text: "Accepts .pdf, .txt, .md — ingestion runs in the background." }),
+      uploadStatus,
+    ])
+  );
+  container.appendChild(el("div", { class: "card" }, [table, loadMoreBtn]));
+
+  await loadPage();
+}
+
+// -- usage -----------------------------------------------------------------
+
+async function renderUsage(container) {
+  container.appendChild(el("h2", { text: "Usage" }));
+
+  const resp = await api("/api/usage");
+  const items = resp.items || [];
+
+  container.appendChild(
+    el("div", { class: "card" }, [
+      el("h3", { text: "Estimated spend (shown range)" }),
+      el("p", {}, ["$" + resp.total_cost_estimate.toFixed(4)]),
+    ])
+  );
+
+  if (items.length === 0) {
+    container.appendChild(el("div", { class: "card" }, [el("p", { class: "muted", text: "No usage recorded yet." })]));
+    return;
+  }
+
+  const table = el("table", {}, [
+    el(
+      "thead",
+      {},
+      el("tr", {}, [
+        el("th", { text: "When" }),
+        el("th", { text: "User" }),
+        el("th", { text: "Provider" }),
+        el("th", { text: "Model" }),
+        el("th", { text: "Tokens in" }),
+        el("th", { text: "Tokens out" }),
+        el("th", { text: "Cost" }),
+        el("th", { text: "Cached" }),
+      ])
+    ),
+  ]);
+  const tbody = el("tbody");
+  for (const u of items) {
+    tbody.appendChild(
+      el("tr", {}, [
+        el("td", { class: "muted", text: u.created }),
+        el("td", { class: "muted", text: u.user_id || "" }),
+        el("td", { text: u.provider }),
+        el("td", { text: u.model }),
+        el("td", { text: String(u.tokens_in) }),
+        el("td", { text: String(u.tokens_out) }),
+        el("td", { text: "$" + u.cost_estimate.toFixed(6) }),
+        el("td", { text: u.cached ? "yes" : "no" }),
+      ])
+    );
+  }
+  table.appendChild(tbody);
+  container.appendChild(el("div", { class: "card" }, [table]));
+}
+
 // -- settings ------------------------------------------------------------
 
-function renderSettings(container) {
+async function renderSettings(container) {
   container.appendChild(el("h2", { text: "Settings" }));
+
+  const current = await api("/api/settings");
+  const status = el("div", { class: "error" });
+
+  function secretField(key, label) {
+    const isSet = current[key] && current[key].set;
+    const input = el("input", {
+      type: "password",
+      placeholder: isSet ? "•••••••• (set — leave blank to keep)" : "not set",
+    });
+    return { key, input, secret: true, label };
+  }
+  function textField(key, label, placeholder) {
+    const input = el("input", { type: "text", value: current[key] || "", placeholder: placeholder || "" });
+    return { key, input, secret: false, label };
+  }
+  function selectField(key, label, options) {
+    const input = el("select", {}, options.map((o) => el("option", { value: o, text: o })));
+    input.value = current[key] || options[0];
+    return { key, input, secret: false, label };
+  }
+
+  const fields = [
+    secretField("anthropic_api_key", "Anthropic API key"),
+    textField("anthropic_model", "Anthropic model", "claude-sonnet-5"),
+    secretField("openai_api_key", "OpenAI API key"),
+    textField("openai_base_url", "OpenAI base URL", "https://api.openai.com/v1"),
+    selectField("embedding_provider", "Embedding provider", ["openai", "ollama"]),
+    secretField("embedding_api_key", "Embedding API key"),
+    textField("embedding_base_url", "Embedding base URL"),
+    textField("embedding_model", "Embedding model", "text-embedding-3-small"),
+    textField("ollama_base_url", "Ollama base URL", "http://localhost:11434"),
+  ];
+
+  const saveBtn = el("button", {
+    text: "Save",
+    onclick: async () => {
+      clear(status);
+      const body = {};
+      for (const f of fields) {
+        if (f.secret) {
+          if (f.input.value !== "") body[f.key] = f.input.value;
+        } else {
+          body[f.key] = f.input.value;
+        }
+      }
+      try {
+        await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
+        navigate(); // re-fetch so secret fields show the fresh masked state
+      } catch (e) {
+        status.appendChild(document.createTextNode(e.message));
+      }
+    },
+  });
+
   container.appendChild(
     el("div", { class: "card" }, [
-      el("h3", { text: "LLM provider keys" }),
-      el("p", { class: "muted", text: "Coming with the LLM gateway (Month 4 of the roadmap)." }),
+      el("h3", { text: "LLM & embedding providers" }),
+      el("p", { class: "muted", text: "Keys are encrypted at rest and never shown again once saved. Saving applies immediately, no restart needed." }),
+      el(
+        "div",
+        { class: "col" },
+        fields.map((f) => el("label", {}, [f.label + " ", f.input])).concat([saveBtn, status])
+      ),
     ])
   );
+
   container.appendChild(
     el("div", { class: "card" }, [
-      el("h3", { text: "About" }),
-      el("p", {}, ["onebox admin dashboard v1."]),
+      el("h3", { text: "Rate limits" }),
+      el("p", {
+        class: "muted",
+        text: "Configured via ONEBOX_RATE_LIMIT_PER_MINUTE and ONEBOX_MONTHLY_SPEND_CAP_USD environment variables.",
+      }),
     ])
   );
+
+  container.appendChild(el("div", { class: "card" }, [el("h3", { text: "About" }), el("p", {}, ["onebox admin dashboard."])]));
 }

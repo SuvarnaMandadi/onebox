@@ -3,8 +3,11 @@
 package server
 
 import (
+	"context"
 	"database/sql"
+	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,27 +19,82 @@ import (
 	"onebox/internal/webui"
 )
 
+// providerBundle groups the embedding/LLM clients built from the
+// current effective config (env vars overlaid with any encrypted
+// _settings overrides). Held behind an atomic pointer so saving a
+// provider key via the dashboard (see settings_handlers.go) takes effect
+// on the next request immediately, without a restart, while in-flight
+// requests keep using whichever bundle they already loaded.
+type providerBundle struct {
+	embedding embeddings.Provider
+	llm       *llm.Router
+}
+
 // Server holds shared dependencies for HTTP handlers.
 type Server struct {
-	cfg               config.Config
-	db                *sql.DB
-	hub               *realtimeHub
-	embeddingProvider embeddings.Provider
-	llmRouter         *llm.Router
-	chatCache         *chatCache
-	rateLimiter       *rateLimiter
+	cfg         config.Config
+	db          *sql.DB
+	hub         *realtimeHub
+	chatCache   *chatCache
+	rateLimiter *rateLimiter
+	providers   atomic.Pointer[providerBundle]
 }
 
 // New builds a Server and its router. Provider sub-clients are left nil
 // when unconfigured (no API key), so a self-hoster who hasn't set one up
 // gets a clear per-request error instead of a broken client.
 func New(cfg config.Config, sqlDB *sql.DB) *Server {
-	s := &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub()}
-	s.embeddingProvider = buildEmbeddingProvider(cfg)
-	s.llmRouter = buildLLMRouter(cfg)
-	s.chatCache = newChatCache()
-	s.rateLimiter = newRateLimiter(cfg.RateLimitPerMinute)
+	s := &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub(), chatCache: newChatCache(), rateLimiter: newRateLimiter(cfg.RateLimitPerMinute)}
+	if err := s.reloadProviders(context.Background()); err != nil {
+		log.Printf("load provider settings: %v (falling back to env-only config)", err)
+		s.providers.Store(&providerBundle{embedding: buildEmbeddingProvider(cfg), llm: buildLLMRouter(cfg)})
+	}
 	return s
+}
+
+// reloadProviders rebuilds the embedding/LLM providers from cfg overlaid
+// with any encrypted overrides in _settings, then atomically swaps them
+// in. Called at startup and after every successful PUT /api/settings.
+func (s *Server) reloadProviders(ctx context.Context) error {
+	stored, err := getAllSettings(ctx, s.db, s.cfg.JWTSecret)
+	if err != nil {
+		return err
+	}
+
+	effective := s.cfg
+	if v, ok := stored[settingAnthropicAPIKey]; ok {
+		effective.AnthropicAPIKey = v
+	}
+	if v, ok := stored[settingAnthropicModel]; ok {
+		effective.AnthropicModel = v
+	}
+	if v, ok := stored[settingOpenAIAPIKey]; ok {
+		effective.OpenAIChatAPIKey = v
+	}
+	if v, ok := stored[settingOpenAIBaseURL]; ok {
+		effective.OpenAIChatBaseURL = v
+	}
+	if v, ok := stored[settingEmbeddingProvider]; ok {
+		effective.EmbeddingProvider = v
+	}
+	if v, ok := stored[settingEmbeddingAPIKey]; ok {
+		effective.EmbeddingAPIKey = v
+	}
+	if v, ok := stored[settingEmbeddingBaseURL]; ok {
+		effective.EmbeddingBaseURL = v
+	}
+	if v, ok := stored[settingEmbeddingModel]; ok {
+		effective.EmbeddingModel = v
+	}
+	if v, ok := stored[settingOllamaBaseURL]; ok {
+		effective.OllamaBaseURL = v
+	}
+
+	s.providers.Store(&providerBundle{
+		embedding: buildEmbeddingProvider(effective),
+		llm:       buildLLMRouter(effective),
+	})
+	return nil
 }
 
 func buildEmbeddingProvider(cfg config.Config) embeddings.Provider {
@@ -99,6 +157,7 @@ func (s *Server) Router() http.Handler {
 		r.Route("/rag", func(r chi.Router) {
 			r.Route("/sources", func(r chi.Router) {
 				r.With(s.requireAnyAuth).Post("/", s.handleCreateRAGSource)
+				r.With(s.requireAdminAuth).Get("/", s.handleListRAGSources)
 				r.With(s.optionalAuth).Get("/{id}", s.handleGetRAGSource)
 				r.With(s.optionalAuth).Delete("/{id}", s.handleDeleteRAGSource)
 			})
@@ -108,6 +167,12 @@ func (s *Server) Router() http.Handler {
 
 		r.With(s.requireAnyAuth).Post("/llm/chat", s.handleLLMChat)
 		r.With(s.requireAnyAuth).Get("/usage", s.handleUsage)
+
+		r.Route("/settings", func(r chi.Router) {
+			r.Use(s.requireAdminAuth)
+			r.Get("/", s.handleGetSettings)
+			r.Put("/", s.handleUpdateSettings)
+		})
 
 		r.Route("/collections", func(r chi.Router) {
 			r.Group(func(r chi.Router) {
