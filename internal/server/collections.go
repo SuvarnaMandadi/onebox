@@ -14,12 +14,26 @@ import (
 // collection is a row from the _collections registry, with schema/rules
 // decoded from their JSON columns.
 type collection struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Schema  Schema `json:"schema"`
-	Rules   Rules  `json:"rules"`
-	Created string `json:"created"`
-	Updated string `json:"updated"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Schema      Schema `json:"schema"`
+	Rules       Rules  `json:"rules"`
+	RecordCount int    `json:"record_count"`
+	Created     string `json:"created"`
+	Updated     string `json:"updated"`
+}
+
+// countCollectionRecords reports how many rows are in a collection's
+// dynamic table — used by the admin dashboard's Home page "total records"
+// stat. A plain COUNT(*) is fine at v0.2 scale, consistent with the
+// brute-force-is-fine-for-now approach already used for RAG similarity.
+func countCollectionRecords(ctx context.Context, sqlDB *sql.DB, name string) (int, error) {
+	var n int
+	err := sqlDB.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %q`, name)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count records in %s: %w", name, err)
+	}
+	return n, nil
 }
 
 var (
@@ -111,7 +125,13 @@ func getCollectionByName(ctx context.Context, sqlDB *sql.DB, name string) (*coll
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errCollectionNotFound
 	}
-	return c, err
+	if err != nil {
+		return nil, err
+	}
+	if c.RecordCount, err = countCollectionRecords(ctx, sqlDB, c.Name); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func listCollections(ctx context.Context, sqlDB *sql.DB) ([]*collection, error) {
@@ -131,7 +151,16 @@ func listCollections(ctx context.Context, sqlDB *sql.DB) ([]*collection, error) 
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, c := range out {
+		if c.RecordCount, err = countCollectionRecords(ctx, sqlDB, c.Name); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // deleteCollection atomically drops the dynamic table and removes it from

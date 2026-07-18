@@ -71,8 +71,9 @@ func (s *Server) handleCreateRAGSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, src)
 }
 
-// handleListRAGSources is admin-only: it powers the dashboard's RAG
-// source manager.
+// handleListRAGSources powers both the admin dashboard's RAG source
+// manager (sees every source) and a regular user's Home page (sees only
+// sources they uploaded).
 func (s *Server) handleListRAGSources(w http.ResponseWriter, r *http.Request) {
 	limit := defaultLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -94,7 +95,10 @@ func (s *Server) handleListRAGSources(w http.ResponseWriter, r *http.Request) {
 		cursorCreated, cursorID = created, id
 	}
 
-	sources, err := listRAGSources(r.Context(), s.db, limit, cursorCreated, cursorID)
+	_, isAdmin := authAdminID(r.Context())
+	ownerID, _ := authUserID(r.Context())
+
+	sources, err := listRAGSources(r.Context(), s.db, limit, cursorCreated, cursorID, ownerID, isAdmin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to list rag sources", nil)
 		return
@@ -113,7 +117,16 @@ func (s *Server) handleListRAGSources(w http.ResponseWriter, r *http.Request) {
 		sources = []*ragSource{}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"items": sources, "nextCursor": nextCursor})
+	statusCounts, total, err := ragSourceStatusCounts(r.Context(), s.db, ownerID, isAdmin)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to count rag sources", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": sources, "nextCursor": nextCursor,
+		"total": total, "status_counts": statusCounts,
+	})
 }
 
 func (s *Server) handleGetRAGSource(w http.ResponseWriter, r *http.Request) {

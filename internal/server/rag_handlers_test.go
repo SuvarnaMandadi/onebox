@@ -255,8 +255,23 @@ func TestListRAGSources(t *testing.T) {
 		}
 	})
 
-	t.Run("non-admin rejected", func(t *testing.T) {
+	t.Run("non-admin sees only own sources", func(t *testing.T) {
 		rec := doAuth(t, srv, http.MethodGet, "/api/rag/sources", userToken, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Items []map[string]any `json:"items"`
+			Total int              `json:"total"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if len(resp.Items) != 2 || resp.Total != 2 {
+			t.Fatalf("got %d items (total=%d), want 2 (both owned by this user)", len(resp.Items), resp.Total)
+		}
+	})
+
+	t.Run("unauthenticated rejected", func(t *testing.T) {
+		rec := doAuth(t, srv, http.MethodGet, "/api/rag/sources", "", nil)
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", rec.Code)
 		}

@@ -1,5 +1,6 @@
 import type {
   AuthResponse,
+  AuthRecord,
   Collection,
   CollectionSchema,
   CollectionRules,
@@ -7,13 +8,17 @@ import type {
   ListParams,
   ListResponse,
   FileRecord,
+  FileListResponse,
   RAGSource,
+  RAGSourceListResponse,
   RAGScoredChunk,
   RAGAnswer,
   ChatMessage,
   ChatResponse,
   UsageRecord,
   RealtimeEvent,
+  UpdateProfileParams,
+  CreatePasswordResetResponse,
 } from "./types.js";
 
 /** Thrown for any non-2xx response, using onebox's {code,message,details} envelope. */
@@ -89,10 +94,45 @@ export class OneboxClient {
   }
 
   auth = {
-    signup: (email: string, password: string) =>
-      this.request<AuthResponse>("/api/auth/signup", { method: "POST", body: JSON.stringify({ email, password }) }),
+    signup: (email: string, password: string, opts: { firstName?: string; lastName?: string } = {}) =>
+      this.request<AuthResponse>("/api/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({ email, password, first_name: opts.firstName, last_name: opts.lastName }),
+      }),
     login: (email: string, password: string) =>
       this.request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+
+    /** The signed-in _users account's own profile. */
+    me: () => this.request<AuthRecord>("/api/auth/me"),
+
+    /** Updates the caller's own profile. A changed email is re-checked for uniqueness. */
+    updateProfile: (params: UpdateProfileParams) =>
+      this.request<AuthRecord>("/api/auth/me", { method: "PATCH", body: JSON.stringify(params) }),
+
+    /** Uploads an avatar image through the same file storage as any other upload. */
+    uploadAvatar: (file: Blob, filename?: string) => {
+      const form = new FormData();
+      form.append("file", file, filename);
+      return this.request<AuthRecord>("/api/auth/me/avatar", { method: "POST", body: form });
+    },
+
+    changePassword: (currentPassword: string, newPassword: string) =>
+      this.request<{ ok: boolean }>("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+      }),
+
+    /**
+     * Consumes a one-time reset token minted by an admin (see
+     * admins.createPasswordReset) — there's no SMTP-based self-service
+     * "forgot password" flow yet, so this is always called with a token a
+     * user received out of band.
+     */
+    resetPassword: (token: string, newPassword: string) =>
+      this.request<{ ok: boolean }>("/api/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({ token, new_password: newPassword }),
+      }),
   };
 
   admins = {
@@ -100,6 +140,18 @@ export class OneboxClient {
       this.request<AuthResponse>("/api/admins/signup", { method: "POST", body: JSON.stringify({ email, password }) }),
     login: (email: string, password: string) =>
       this.request<AuthResponse>("/api/admins/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+
+    /**
+     * Admin-only: mints a one-time password reset token for a _users
+     * account by email. Since v0.2 has no SMTP integration, the admin
+     * hands this token to the user out of band (chat, a ticket, in
+     * person); the user then calls auth.resetPassword(token, ...).
+     */
+    createPasswordReset: (email: string) =>
+      this.request<CreatePasswordResetResponse>("/api/admins/password-resets", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      }),
   };
 
   collections = {
@@ -146,7 +198,7 @@ export class OneboxClient {
       if (params.limit) qs.set("limit", String(params.limit));
       if (params.cursor) qs.set("cursor", params.cursor);
       const query = qs.toString();
-      return this.request<ListResponse<FileRecord>>("/api/files" + (query ? `?${query}` : ""));
+      return this.request<FileListResponse>("/api/files" + (query ? `?${query}` : ""));
     },
     download: (id: string) => this.rawRequest(`/api/files/${id}`),
     delete: (id: string) => this.request<void>(`/api/files/${id}`, { method: "DELETE" }),
@@ -157,6 +209,13 @@ export class OneboxClient {
       const form = new FormData();
       form.append("file", file, filename);
       return this.request<RAGSource>("/api/rag/sources", { method: "POST", body: form });
+    },
+    listSources: (params: { limit?: number; cursor?: string } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.limit) qs.set("limit", String(params.limit));
+      if (params.cursor) qs.set("cursor", params.cursor);
+      const query = qs.toString();
+      return this.request<RAGSourceListResponse>("/api/rag/sources" + (query ? `?${query}` : ""));
     },
     getSource: (id: string) => this.request<RAGSource>(`/api/rag/sources/${id}`),
     deleteSource: (id: string) => this.request<void>(`/api/rag/sources/${id}`, { method: "DELETE" }),

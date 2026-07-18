@@ -2,11 +2,83 @@
 // Hash-based routing; every view is a render(container) function.
 
 const TOKEN_KEY = "onebox_admin_token";
+const ROLE_KEY = "onebox_role"; // "admin" | "user" — which login/signup endpoint issued the current token
 const THEME_KEY = "onebox_theme";
 
 function getToken() { return localStorage.getItem(TOKEN_KEY) || ""; }
 function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
 function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+
+function getRole() { return localStorage.getItem(ROLE_KEY) || "user"; }
+function setRole(r) { localStorage.setItem(ROLE_KEY, r); }
+function clearRole() { localStorage.removeItem(ROLE_KEY); }
+function isAdminRole() { return getRole() === "admin"; }
+
+// accountCache holds the signed-in identity's display info (name, email,
+// avatar) so the sidebar and Home page don't each re-fetch it. Cleared on
+// logout/login and refreshed whenever the Account page saves changes.
+let accountCache = null;
+
+async function loadAccount(force = false) {
+  if (accountCache && !force) return accountCache;
+  if (isAdminRole()) {
+    // _admins has no profile fields (name/avatar) — only email is
+    // available, decoded from the JWT-issued record we cached at login.
+    accountCache = JSON.parse(sessionStorage.getItem("onebox_admin_record") || "null");
+  } else {
+    accountCache = await api("/api/auth/me");
+  }
+  return accountCache;
+}
+
+function initials(nameOrEmail) {
+  const trimmed = (nameOrEmail || "").trim();
+  if (!trimmed) return "?";
+  const parts = trimmed.split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return trimmed.slice(0, 2).toUpperCase();
+}
+
+function displayName(account) {
+  if (!account) return "";
+  const full = [account.first_name, account.last_name].filter(Boolean).join(" ").trim();
+  if (full) return full;
+  if (account.email) return account.email.split("@")[0];
+  return "";
+}
+
+function avatarNode(account, size = "avatar-sm") {
+  const node = el("span", { class: "avatar " + size });
+  fillAvatarNode(node, account);
+  return node;
+}
+
+// fillAvatarNode populates an existing avatar <span> in place (so callers
+// that already hold a reference to a fixed-id slot, like the sidebar's
+// #accountAvatar, don't have to juggle replacing/re-tagging DOM nodes).
+function fillAvatarNode(node, account) {
+  clear(node);
+  if (account && account.avatar_file_id) {
+    node.appendChild(el("img", { src: "/api/files/" + account.avatar_file_id, alt: "" }));
+  } else {
+    node.textContent = initials(displayName(account) || (account && account.email));
+  }
+}
+
+async function refreshAccountSummary() {
+  const nameEl = document.getElementById("accountName");
+  const roleEl = document.querySelector("#accountSummary .account-summary-role");
+  const avatarSlot = document.getElementById("accountAvatar");
+  if (!nameEl) return;
+  try {
+    const account = await loadAccount();
+    nameEl.textContent = displayName(account) || "Account";
+    roleEl.textContent = isAdminRole() ? "Admin" : "User";
+    fillAvatarNode(avatarSlot, account);
+  } catch (e) {
+    nameEl.textContent = isAdminRole() ? "Admin" : "Account";
+  }
+}
 
 // api() wraps fetch: sends the admin bearer token, parses JSON, and
 // throws a readable Error using the server's {code,message} envelope.
@@ -179,8 +251,15 @@ const app = document.getElementById("app");
 
 document.getElementById("logoutBtn").addEventListener("click", () => {
   clearToken();
+  clearRole();
+  sessionStorage.removeItem("onebox_admin_record");
+  accountCache = null;
+  // Setting location.hash (when it actually changes) fires the
+  // "hashchange" listener below, which calls navigate() itself — an
+  // explicit extra call here would race it: both invocations are async
+  // and can interleave, appending duplicate content to #app. See the
+  // same reasoning at the other location.hash assignments in this file.
   location.hash = "#/login";
-  navigate();
 });
 
 function currentRoute() {
@@ -190,8 +269,15 @@ function currentRoute() {
 }
 
 function updateActiveNav(routeName) {
-  document.querySelectorAll("#sidebar nav a").forEach((a) => {
+  document.querySelectorAll("#sidebar a[data-route]").forEach((a) => {
     a.classList.toggle("active", a.dataset.route === routeName);
+  });
+}
+
+function applyRoleVisibility() {
+  const admin = isAdminRole();
+  document.querySelectorAll('[data-role="admin"]').forEach((node) => {
+    node.classList.toggle("hidden", !admin);
   });
 }
 
@@ -202,18 +288,34 @@ async function navigate() {
 
   if (!authed) {
     clear(loginRoot);
-    renderLogin(loginRoot);
+    const parts = currentRoute();
+    if (parts[0] === "signup") renderSignupPage(loginRoot);
+    else if (parts[0] === "forgot-password") renderForgotPasswordPage(loginRoot);
+    else renderLoginPage(loginRoot);
     return;
   }
 
+  applyRoleVisibility();
+  refreshAccountSummary();
+
   clear(app);
+  app.classList.remove("page-transition");
+  void app.offsetWidth; // restart the entrance animation on every route change
+  app.classList.add("page-transition");
+
   const parts = currentRoute();
   if (parts.length === 0) {
-    location.hash = "#/collections";
+    location.hash = "#/home";
     return;
   }
   try {
-    if (parts[0] === "collections" && parts.length === 1) {
+    if (parts[0] === "home") {
+      updateActiveNav("home");
+      await renderHome(app);
+    } else if (parts[0] === "account") {
+      updateActiveNav("account");
+      await renderAccount(app);
+    } else if (parts[0] === "collections" && parts.length === 1) {
       updateActiveNav("collections");
       await renderCollections(app);
     } else if (parts[0] === "records" && parts.length === 2) {
@@ -232,7 +334,7 @@ async function navigate() {
       updateActiveNav("settings");
       await renderSettings(app);
     } else {
-      location.hash = "#/collections";
+      location.hash = "#/home";
     }
   } catch (e) {
     app.appendChild(el("div", { class: "card error-text", text: e.message }));
@@ -243,39 +345,542 @@ async function navigate() {
 window.addEventListener("hashchange", navigate);
 window.addEventListener("DOMContentLoaded", navigate);
 
-// -- login -----------------------------------------------------------
+// -- auth pages: login / signup / forgot-password ------------------------
+// Two distinct pages (not one form with a signup toggle), each supporting
+// both a regular _users session and an _admins session via a secondary
+// "log in/sign up as admin instead" link — the dashboard now serves both
+// audiences, so the primary flow is the _users one (the common case for
+// an app's end users) with the admin path one click away.
 
-function renderLogin(container) {
-  const email = el("input", { type: "email", placeholder: "email", autocomplete: "username" });
-  const password = el("input", { type: "password", placeholder: "password", autocomplete: "current-password" });
-  const status = el("div", { class: "error-text" });
+function passwordField(placeholder, autocomplete) {
+  const input = el("input", { type: "password", placeholder, autocomplete });
+  const toggle = el("button", { type: "button", class: "password-toggle", text: "Show" });
+  toggle.setAttribute("aria-label", "Show password");
+  toggle.addEventListener("click", () => {
+    const showing = input.type === "text";
+    input.type = showing ? "password" : "text";
+    toggle.textContent = showing ? "Show" : "Hide";
+    toggle.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+  });
+  return { input, wrap: el("div", { class: "password-field" }, [input, toggle]) };
+}
 
-  async function submit(endpoint) {
+// authBackground is a decorative, hand-rolled SVG gradient — no external
+// image assets, so it stays tiny and embeds cleanly via go:embed. Colors
+// are CSS custom properties (set via inline `style`, since SVG
+// presentation *attributes* don't reliably resolve var(), but inline
+// styles do) so it automatically matches the current theme and accent.
+function authBackground() {
+  const wrap = el("div", { class: "auth-bg" });
+  wrap.setAttribute("aria-hidden", "true");
+  wrap.innerHTML =
+    '<svg viewBox="0 0 800 600" preserveAspectRatio="xMidYMid slice">' +
+    '<defs>' +
+    '<linearGradient id="obg1" x1="0" y1="0" x2="1" y2="1">' +
+    '<stop offset="0%" style="stop-color:var(--accent);stop-opacity:0.32"/>' +
+    '<stop offset="100%" style="stop-color:var(--accent-2);stop-opacity:0.04"/>' +
+    '</linearGradient>' +
+    '<linearGradient id="obg2" x1="1" y1="0" x2="0" y2="1">' +
+    '<stop offset="0%" style="stop-color:var(--accent-2);stop-opacity:0.28"/>' +
+    '<stop offset="100%" style="stop-color:var(--accent);stop-opacity:0"/>' +
+    '</linearGradient>' +
+    '</defs>' +
+    '<circle cx="620" cy="60" r="280" fill="url(#obg1)"/>' +
+    '<circle cx="90" cy="540" r="320" fill="url(#obg2)"/>' +
+    '<circle cx="700" cy="580" r="150" fill="url(#obg1)"/>' +
+    '</svg>';
+  return wrap;
+}
+
+function authBrandBlock() {
+  return [
+    el("div", { class: "auth-brand" }, [el("span", { class: "brand-mark" }, "◆"), "onebox"]),
+    el("div", { class: "auth-tagline", text: "Your entire AI backend in one box" }),
+  ];
+}
+
+function mountAuthPage(container, card) {
+  container.appendChild(authBackground());
+  container.appendChild(el("div", { class: "auth-shell page-transition" }, [card]));
+}
+
+function renderLoginPage(container, roleMode = "user") {
+  const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "username" });
+  const { input: passwordInput, wrap: passwordWrap } = passwordField("Password", "current-password");
+  const status = el("div", { class: "field-error" });
+
+  const submitBtn = actionButton(
+    roleMode === "admin" ? "Log in as admin" : "Log in",
+    { style: "width:100%;justify-content:center" },
+    async () => {
+      clear(status);
+      if (!email.value.trim() || !passwordInput.value) {
+        status.textContent = "Enter your email and password.";
+        return;
+      }
+      try {
+        const endpoint = roleMode === "admin" ? "/api/admins/login" : "/api/auth/login";
+        const resp = await api(endpoint, {
+          method: "POST",
+          body: JSON.stringify({ email: email.value.trim(), password: passwordInput.value }),
+        });
+        setToken(resp.token);
+        setRole(roleMode);
+        if (roleMode === "admin") sessionStorage.setItem("onebox_admin_record", JSON.stringify(resp.record));
+        accountCache = null;
+        toastSuccess("Logged in");
+        location.hash = "#/home"; // triggers navigate() via the hashchange listener
+      } catch (e) {
+        status.textContent = e.message;
+      }
+    }
+  );
+
+  const roleSwitch = el("button", {
+    type: "button",
+    class: "link-btn",
+    text: roleMode === "admin" ? "Log in as a user instead" : "Are you the admin? Log in as admin",
+  });
+  roleSwitch.addEventListener("click", () => {
+    clear(container);
+    renderLoginPage(container, roleMode === "admin" ? "user" : "admin");
+  });
+
+  const card = el("div", { class: "auth-card" }, [
+    ...authBrandBlock(),
+    el("h2", { class: "auth-title", text: roleMode === "admin" ? "Admin log in" : "Log in" }),
+    el("div", { class: "col" }, [
+      el("label", {}, ["Email", email]),
+      el("label", {}, ["Password", passwordWrap]),
+      el("div", { class: "auth-links" }, [el("a", { href: "#/forgot-password", text: "Forgot password?" })]),
+      submitBtn,
+      status,
+    ]),
+    el("div", { class: "auth-role-switch" }, [roleSwitch]),
+    el("div", { class: "auth-switch" }, ["Don't have an account? ", el("a", { href: "#/signup", text: "Sign up" })]),
+  ]);
+
+  mountAuthPage(container, card);
+}
+
+function renderSignupPage(container, roleMode = "user") {
+  const firstName = el("input", { type: "text", placeholder: "First name", autocomplete: "given-name" });
+  const lastName = el("input", { type: "text", placeholder: "Last name", autocomplete: "family-name" });
+  const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "username" });
+  const { input: passwordInput, wrap: passwordWrap } = passwordField("Password", "new-password");
+  const { input: confirmInput, wrap: confirmWrap } = passwordField("Confirm password", "new-password");
+  const status = el("div", { class: "field-error" });
+
+  const submitBtn = actionButton(
+    roleMode === "admin" ? "Create admin account" : "Sign up",
+    { style: "width:100%;justify-content:center" },
+    async () => {
+      clear(status);
+      if (!email.value.trim() || !passwordInput.value) {
+        status.textContent = "Enter your email and a password.";
+        return;
+      }
+      if (passwordInput.value.length < 8) {
+        status.textContent = "Password must be at least 8 characters.";
+        return;
+      }
+      if (passwordInput.value !== confirmInput.value) {
+        status.textContent = "Passwords don't match.";
+        return;
+      }
+      try {
+        if (roleMode === "admin") {
+          const resp = await api("/api/admins/signup", {
+            method: "POST",
+            body: JSON.stringify({ email: email.value.trim(), password: passwordInput.value }),
+          });
+          setToken(resp.token);
+          setRole("admin");
+          sessionStorage.setItem("onebox_admin_record", JSON.stringify(resp.record));
+        } else {
+          const resp = await api("/api/auth/signup", {
+            method: "POST",
+            body: JSON.stringify({
+              email: email.value.trim(),
+              password: passwordInput.value,
+              first_name: firstName.value.trim(),
+              last_name: lastName.value.trim(),
+            }),
+          });
+          setToken(resp.token);
+          setRole("user");
+        }
+        accountCache = null;
+        toastSuccess("Account created");
+        location.hash = "#/home"; // triggers navigate() via the hashchange listener
+      } catch (e) {
+        status.textContent = e.message;
+      }
+    }
+  );
+
+  const roleSwitch = el("button", {
+    type: "button",
+    class: "link-btn",
+    text:
+      roleMode === "admin"
+        ? "Sign up as a regular user instead"
+        : "Setting up onebox for the first time? Create the admin account",
+  });
+  roleSwitch.addEventListener("click", () => {
+    clear(container);
+    renderSignupPage(container, roleMode === "admin" ? "user" : "admin");
+  });
+
+  const fields =
+    roleMode === "admin"
+      ? [el("label", {}, ["Email", email]), el("label", {}, ["Password", passwordWrap]), el("label", {}, ["Confirm password", confirmWrap])]
+      : [
+          el("div", { class: "row" }, [
+            el("label", { style: "flex:1" }, ["First name", firstName]),
+            el("label", { style: "flex:1" }, ["Last name", lastName]),
+          ]),
+          el("label", {}, ["Email", email]),
+          el("label", {}, ["Password", passwordWrap]),
+          el("label", {}, ["Confirm password", confirmWrap]),
+        ];
+
+  const card = el("div", { class: "auth-card" }, [
+    ...authBrandBlock(),
+    el("h2", { class: "auth-title", text: roleMode === "admin" ? "Create the admin account" : "Sign up" }),
+    el("div", { class: "col" }, fields.concat([submitBtn, status])),
+    el("div", { class: "auth-role-switch" }, [roleSwitch]),
+    el("div", { class: "auth-switch" }, ["Already have an account? ", el("a", { href: "#/login", text: "Log in" })]),
+  ]);
+
+  mountAuthPage(container, card);
+}
+
+function renderForgotPasswordPage(container) {
+  const token = el("input", { type: "text", placeholder: "Reset token from your admin" });
+  const { input: newPw, wrap: newPwWrap } = passwordField("New password", "new-password");
+  const { input: confirmPw, wrap: confirmPwWrap } = passwordField("Confirm new password", "new-password");
+  const status = el("div", { class: "field-error" });
+
+  const submitBtn = actionButton("Reset password", { style: "width:100%;justify-content:center" }, async () => {
     clear(status);
+    if (!token.value.trim()) {
+      status.textContent = "Paste the reset token your admin gave you.";
+      return;
+    }
+    if (newPw.value.length < 8) {
+      status.textContent = "Password must be at least 8 characters.";
+      return;
+    }
+    if (newPw.value !== confirmPw.value) {
+      status.textContent = "Passwords don't match.";
+      return;
+    }
     try {
-      const resp = await api("/api/admins/" + endpoint, {
+      await api("/api/auth/reset-password", {
         method: "POST",
-        body: JSON.stringify({ email: email.value, password: password.value }),
+        body: JSON.stringify({ token: token.value.trim(), new_password: newPw.value }),
       });
-      setToken(resp.token);
-      toastSuccess(endpoint === "signup" ? "Admin account created" : "Logged in");
-      location.hash = "#/collections";
-      navigate();
+      toastSuccess("Password reset — log in with your new password");
+      location.hash = "#/login"; // triggers navigate() via the hashchange listener
     } catch (e) {
       status.textContent = e.message;
     }
-  }
+  });
 
-  const loginBtn = actionButton("Log in", {}, () => submit("login"));
-  const bootstrapBtn = actionButton("Create first admin account", { class: "btn-secondary" }, () => submit("signup"));
+  const card = el("div", { class: "auth-card" }, [
+    ...authBrandBlock(),
+    el("h2", { class: "auth-title", text: "Reset your password" }),
+    el("p", { class: "muted", style: "font-size:0.86rem" }, [
+      "onebox doesn't send reset emails yet — ask whoever administers your onebox instance to generate a one-time reset token from their dashboard's Settings page, then paste it below.",
+    ]),
+    el("div", { class: "col" }, [
+      el("label", {}, ["Reset token", token]),
+      el("label", {}, ["New password", newPwWrap]),
+      el("label", {}, ["Confirm new password", confirmPwWrap]),
+      submitBtn,
+      status,
+    ]),
+    el("div", { class: "auth-switch" }, [el("a", { href: "#/login", text: "← Back to log in" })]),
+  ]);
+
+  mountAuthPage(container, card);
+}
+
+// -- home ------------------------------------------------------------
+
+function statCard(opts) {
+  const card = el("a", { href: opts.href, class: "stat-card" }, [
+    el("div", { class: "stat-card-icon", text: opts.icon }),
+    el("div", { class: "stat-card-value", text: opts.value }),
+    el("div", { class: "stat-card-label", text: opts.label }),
+    opts.sub ? el("div", { class: "stat-card-sub", text: opts.sub }) : null,
+  ]);
+  return card;
+}
+
+function monthStartISO() {
+  return new Date().toISOString().slice(0, 7) + "-01T00:00:00.000Z";
+}
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return iso;
+  const diffMs = Date.now() - then;
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return hours + "h ago";
+  const days = Math.round(hours / 24);
+  if (days < 30) return days + "d ago";
+  return iso.slice(0, 10);
+}
+
+async function renderHome(container) {
+  const account = await loadAccount();
+  const admin = isAdminRole();
+  const greetingName = admin ? (account && account.email ? account.email.split("@")[0] : "there") : displayName(account) || "there";
+  const hourGreeting = new Date().getHours() < 12 ? "Hi" : "Welcome back";
 
   container.appendChild(
-    el("div", { class: "card login-card" }, [
-      el("h2", { text: "onebox admin" }),
-      el("div", { class: "col" }, [email, password, el("div", { class: "row" }, [loginBtn, bootstrapBtn]), status]),
-      el("p", { class: "muted", text: "New install? Use \"Create first admin account\" once — it only works before any admin exists." }),
+    el("div", { class: "hero" }, [
+      el("div", { class: "hero-greeting", text: hourGreeting + ", " + greetingName }),
+      el("div", { class: "hero-tagline", text: "Your entire AI backend in one box" }),
     ])
   );
+
+  const statGrid = el("div", { class: "stat-grid" });
+  container.appendChild(statGrid);
+
+  const activityCard = el("div", { class: "card" }, [el("h3", { text: "Recent activity" }), el("p", { class: "muted", text: "Loading…" })]);
+  container.appendChild(activityCard);
+
+  const [filesResp, ragResp, usageResp, collectionsResp] = await Promise.all([
+    api("/api/files?limit=5").catch(() => ({ items: [], total: 0 })),
+    api("/api/rag/sources?limit=5").catch(() => ({ items: [], total: 0, status_counts: {} })),
+    api("/api/usage?from=" + monthStartISO()).catch(() => ({ items: [], total_cost_estimate: 0 })),
+    admin ? api("/api/collections").catch(() => ({ items: [] })) : Promise.resolve(null),
+  ]);
+
+  const ready = ragResp.status_counts && ragResp.status_counts.done ? ragResp.status_counts.done : 0;
+  const processing =
+    ((ragResp.status_counts && ragResp.status_counts.pending) || 0) + ((ragResp.status_counts && ragResp.status_counts.processing) || 0);
+
+  if (admin && collectionsResp) {
+    const items = collectionsResp.items || [];
+    const totalRecords = items.reduce((sum, c) => sum + (c.record_count || 0), 0);
+    statGrid.appendChild(statCard({ href: "#/collections", icon: "🗂️", value: String(items.length), label: "Collections" }));
+    statGrid.appendChild(
+      statCard({ href: "#/collections", icon: "📇", value: String(totalRecords), label: "Total records", sub: "across all collections" })
+    );
+  }
+  statGrid.appendChild(
+    statCard({
+      href: "#/rag",
+      icon: "📚",
+      value: String(ragResp.total || 0),
+      label: "Documents",
+      sub: ragResp.total ? ready + " ready · " + processing + " processing" : "none yet",
+    })
+  );
+  statGrid.appendChild(statCard({ href: "#/files", icon: "📁", value: String(filesResp.total || 0), label: "Files stored" }));
+  statGrid.appendChild(
+    statCard({
+      href: "#/usage",
+      icon: "✨",
+      value: String((usageResp.items || []).length),
+      label: "AI calls this month",
+      sub: "$" + (usageResp.total_cost_estimate || 0).toFixed(4) + " est. spend",
+    })
+  );
+
+  clear(activityCard);
+  activityCard.appendChild(el("h3", { text: "Recent activity" }));
+  const events = []
+    .concat((filesResp.items || []).map((f) => ({ icon: "📁", text: '"' + f.filename + '" uploaded', created: f.created })))
+    .concat(
+      (ragResp.items || []).map((s) => ({
+        icon: "📚",
+        text: '"' + s.filename + '" ' + (s.status === "done" ? "ingested" : s.status),
+        created: s.created,
+      }))
+    )
+    .sort((a, b) => (a.created < b.created ? 1 : -1))
+    .slice(0, 6);
+
+  const brandNew = (ragResp.total || 0) === 0 && (filesResp.total || 0) === 0 && (admin ? (collectionsResp.items || []).length === 0 : true);
+
+  if (events.length === 0 && brandNew) {
+    // One friendly empty state for a fresh account, not two saying the
+    // same thing — this replaces the activity card's own generic empty
+    // state rather than stacking alongside it.
+    activityCard.appendChild(
+      emptyState(
+        "🚀",
+        "Let's get you started",
+        admin
+          ? "Create a collection, upload a file, or ingest a document to see activity show up here."
+          : "Upload a file on the Files page, or ingest a document on RAG sources to enable grounded Q&A."
+      )
+    );
+  } else if (events.length === 0) {
+    activityCard.appendChild(emptyState("👋", "Nothing here yet", "Upload a file or a document to see activity show up here."));
+  } else {
+    const list = el("div", { class: "activity-list" });
+    for (const ev of events) {
+      list.appendChild(
+        el("div", { class: "activity-row" }, [
+          el("span", { class: "activity-icon", text: ev.icon }),
+          el("span", { class: "activity-text", text: ev.text }),
+          el("span", { class: "activity-time", text: timeAgo(ev.created) }),
+        ])
+      );
+    }
+    activityCard.appendChild(list);
+  }
+}
+
+// -- account -----------------------------------------------------------
+
+async function renderAccount(container) {
+  container.appendChild(el("h2", { text: "Account" }));
+
+  if (isAdminRole()) {
+    const account = await loadAccount();
+    container.appendChild(
+      el("div", { class: "card" }, [
+        el("div", { class: "account-header" }, [avatarNode(account, "avatar-lg"), el("div", { class: "account-header-name", text: account ? account.email : "Admin" })]),
+        el("p", { class: "muted", text: "Admin accounts don't have profile fields (name, phone, avatar) or self-service password change in v0.2 — those are v0.2 additions to regular user accounts only. Use Settings to manage instance-wide configuration." }),
+      ])
+    );
+    return;
+  }
+
+  const account = await loadAccount(true);
+  const firstName = el("input", { type: "text", value: account.first_name || "", autocomplete: "given-name" });
+  const lastName = el("input", { type: "text", value: account.last_name || "", autocomplete: "family-name" });
+  const email = el("input", { type: "email", value: account.email || "", autocomplete: "username" });
+  const phone = el("input", { type: "tel", value: account.phone || "", autocomplete: "tel", placeholder: "optional" });
+  const profileStatus = el("div", { class: "error-text" });
+
+  const avatarSlot = avatarNode(account, "avatar-lg");
+  const avatarInput = el("input", { type: "file", accept: "image/*" });
+  const avatarStatus = el("div", { class: "error-text" });
+  const avatarBtn = actionButton("Upload photo", { class: "btn-secondary" }, async () => {
+    clear(avatarStatus);
+    if (!avatarInput.files[0]) return;
+    const form = new FormData();
+    form.append("file", avatarInput.files[0]);
+    try {
+      const updated = await api("/api/auth/me/avatar", { method: "POST", body: form });
+      accountCache = updated;
+      fillAvatarNode(avatarSlot, updated);
+      avatarInput.value = "";
+      toastSuccess("Profile photo updated");
+      refreshAccountSummary();
+    } catch (e) {
+      avatarStatus.textContent = e.message;
+      throw e;
+    }
+  });
+
+  const saveProfileBtn = actionButton("Save changes", { loadingLabel: "Saving..." }, async () => {
+    clear(profileStatus);
+    try {
+      const updated = await api("/api/auth/me", {
+        method: "PATCH",
+        body: JSON.stringify({
+          email: email.value.trim(),
+          first_name: firstName.value.trim(),
+          last_name: lastName.value.trim(),
+          phone: phone.value.trim(),
+        }),
+      });
+      accountCache = updated;
+      toastSuccess("Profile updated");
+      refreshAccountSummary();
+    } catch (e) {
+      profileStatus.textContent = e.message;
+      toastError("Couldn't save profile: " + e.message);
+      throw e;
+    }
+  });
+
+  container.appendChild(
+    el("div", { class: "card" }, [
+      el("div", { class: "avatar-upload-row" }, [
+        avatarSlot,
+        el("div", { class: "col", style: "gap:6px" }, [
+          el("div", { class: "row" }, [avatarInput, avatarBtn]),
+          el("div", { class: "muted", style: "font-size:0.8rem", text: "PNG or JPG. Shows your initials until you upload one." }),
+          avatarStatus,
+        ]),
+      ]),
+    ])
+  );
+
+  container.appendChild(
+    el("div", { class: "card" }, [
+      el("h3", { text: "Profile" }),
+      el("div", { class: "col" }, [
+        el("div", { class: "row" }, [
+          el("label", { style: "flex:1" }, ["First name", firstName]),
+          el("label", { style: "flex:1" }, ["Last name", lastName]),
+        ]),
+        el("label", {}, ["Email", email]),
+        el("label", {}, ["Phone (optional)", phone]),
+        saveProfileBtn,
+        profileStatus,
+      ]),
+    ])
+  );
+
+  container.appendChild(renderChangePasswordCard());
+}
+
+function renderChangePasswordCard() {
+  const { input: currentPw, wrap: currentPwWrap } = passwordField("Current password", "current-password");
+  const { input: newPw, wrap: newPwWrap } = passwordField("New password", "new-password");
+  const { input: confirmPw, wrap: confirmPwWrap } = passwordField("Confirm new password", "new-password");
+  const status = el("div", { class: "error-text" });
+
+  const submitBtn = actionButton("Change password", { loadingLabel: "Changing..." }, async () => {
+    clear(status);
+    if (newPw.value.length < 8) {
+      status.textContent = "New password must be at least 8 characters.";
+      return;
+    }
+    if (newPw.value !== confirmPw.value) {
+      status.textContent = "New passwords don't match.";
+      return;
+    }
+    try {
+      await api("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ current_password: currentPw.value, new_password: newPw.value }),
+      });
+      toastSuccess("Password changed");
+      currentPw.value = "";
+      newPw.value = "";
+      confirmPw.value = "";
+    } catch (e) {
+      status.textContent = e.message;
+      throw e;
+    }
+  });
+
+  return el("div", { class: "card" }, [
+    el("h3", { text: "Change password" }),
+    el("div", { class: "col" }, [
+      el("label", {}, ["Current password", currentPwWrap]),
+      el("label", {}, ["New password", newPwWrap]),
+      el("label", {}, ["Confirm new password", confirmPwWrap]),
+      submitBtn,
+      status,
+    ]),
+  ]);
 }
 
 // -- collections -------------------------------------------------------
@@ -879,6 +1484,46 @@ async function renderUsage(container) {
   container.appendChild(el("div", { class: "card" }, [table]));
 }
 
+// renderPasswordResetPanel is the admin-side half of the password-reset
+// flow: since onebox doesn't send email yet, an admin looks up a user by
+// email here and gets a one-time token + expiry back to hand them out of
+// band. The user then pastes it into the dashboard's
+// #/forgot-password page, which calls POST /api/auth/reset-password.
+// Clean seam for later: once SMTP settings exist, an unauthenticated
+// "forgot password" endpoint can call the same token-issuing path and
+// email it automatically — no change needed here beyond adding that caller.
+function renderPasswordResetPanel() {
+  const email = el("input", { type: "email", placeholder: "user@example.com" });
+  const status = el("div", { class: "error-text" });
+  const result = el("div", { class: "hidden" });
+
+  const submitBtn = actionButton("Generate reset token", { class: "btn-secondary" }, async () => {
+    clear(status);
+    result.classList.add("hidden");
+    if (!email.value.trim()) return;
+    try {
+      const resp = await api("/api/admins/password-resets", {
+        method: "POST",
+        body: JSON.stringify({ email: email.value.trim() }),
+      });
+      clear(result);
+      result.classList.remove("hidden");
+      result.appendChild(el("p", { class: "muted", text: "Give this token to " + resp.email + " — it expires " + new Date(resp.expires_at).toLocaleString() + " and can only be used once." }));
+      result.appendChild(el("input", { readonly: "readonly", value: resp.token, onclick: (e) => e.target.select() }));
+      toastSuccess("Reset token generated");
+    } catch (e) {
+      status.textContent = e.message;
+      throw e;
+    }
+  });
+
+  return el("div", { class: "card" }, [
+    el("h3", { text: "Reset a user's password" }),
+    el("p", { class: "muted", text: "onebox has no SMTP integration yet, so users can't request a reset email themselves. Generate a one-time token here and share it with them directly — they redeem it on the dashboard's \"forgot password\" page." }),
+    el("div", { class: "col" }, [el("label", {}, ["User email", email]), submitBtn, status, result]),
+  ]);
+}
+
 // -- settings ------------------------------------------------------------
 
 async function renderSettings(container) {
@@ -949,6 +1594,8 @@ async function renderSettings(container) {
       ),
     ])
   );
+
+  container.appendChild(renderPasswordResetPanel());
 
   container.appendChild(
     el("div", { class: "card" }, [

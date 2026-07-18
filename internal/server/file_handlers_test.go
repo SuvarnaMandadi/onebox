@@ -118,8 +118,25 @@ func TestListFiles(t *testing.T) {
 		}
 	})
 
-	t.Run("non-admin rejected", func(t *testing.T) {
+	t.Run("non-admin sees only own files", func(t *testing.T) {
 		rec := doAuth(t, srv, http.MethodGet, "/api/files", userToken, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Items []fileRecord `json:"items"`
+			Total int          `json:"total"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if len(resp.Items) != 2 || resp.Total != 2 {
+			t.Fatalf("got %d items (total=%d), want 2 (both owned by this user)", len(resp.Items), resp.Total)
+		}
+	})
+
+	t.Run("unauthenticated rejected", func(t *testing.T) {
+		rec := doAuth(t, srv, http.MethodGet, "/api/files", "", nil)
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
 		}

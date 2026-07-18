@@ -2,6 +2,10 @@ export interface AuthRecord {
   id: string;
   email: string;
   verified?: boolean;
+  first_name: string;
+  last_name: string;
+  phone: string;
+  avatar_file_id?: string;
   created: string;
   updated: string;
 }
@@ -36,6 +40,7 @@ export interface Collection {
   name: string;
   schema: CollectionSchema;
   rules: CollectionRules;
+  record_count: number;
   created: string;
   updated: string;
 }
@@ -95,6 +100,15 @@ export interface RAGAnswer {
   sources: RAGScoredChunk[];
 }
 
+export interface FileListResponse extends ListResponse<FileRecord> {
+  total: number;
+}
+
+export interface RAGSourceListResponse extends ListResponse<RAGSource> {
+  total: number;
+  status_counts: Record<string, number>;
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -121,4 +135,18 @@ export interface RealtimeEvent<T = RecordBase> {
   action: "create" | "update" | "delete";
   collection: string;
   record: T;
+}
+
+export interface UpdateProfileParams {
+  email: string;
+  first_name?: string;
+  last_name?: string;
+  phone?: string;
+}
+
+export interface CreatePasswordResetResponse {
+  token: string;
+  expires_at: string;
+  user_id: string;
+  email: string;
 }

@@ -9,17 +9,25 @@
 <body>
   <div id="shell" class="hidden">
     <aside id="sidebar">
-      <div class="brand">
+      <a href="#/home" class="brand" data-route="home">
         <span class="brand-mark">◆</span> onebox
-      </div>
-      <nav>
-        <a href="#/collections" data-route="collections">Collections</a>
+      </a>
+      <nav id="mainNav">
+        <a href="#/home" data-route="home">Home</a>
+        <a href="#/collections" data-route="collections" data-role="admin">Collections</a>
         <a href="#/files" data-route="files">Files</a>
         <a href="#/rag" data-route="rag">RAG sources</a>
         <a href="#/usage" data-route="usage">Usage</a>
-        <a href="#/settings" data-route="settings">Settings</a>
+        <a href="#/settings" data-route="settings" data-role="admin">Settings</a>
       </nav>
       <div class="sidebar-footer">
+        <a href="#/account" id="accountSummary" class="account-summary" data-route="account">
+          <span id="accountAvatar" class="avatar avatar-sm"></span>
+          <span class="account-summary-text">
+            <span id="accountName" class="account-summary-name"></span>
+            <span class="account-summary-role muted"></span>
+          </span>
+        </a>
         <button id="themeToggle" class="btn-ghost" type="button" title="Toggle light/dark theme">🌓 Theme</button>
         <button id="logoutBtn" class="btn-ghost" type="button">Log out</button>
       </div>

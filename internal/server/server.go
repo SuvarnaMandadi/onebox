@@ -146,18 +146,28 @@ func (s *Server) Router() http.Handler {
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", s.handleSignup)
 			r.Post("/login", s.handleLogin)
+			r.Post("/reset-password", s.handleResetPassword)
+
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireUserAuth)
+				r.Get("/me", s.handleMe)
+				r.Patch("/me", s.handleUpdateMe)
+				r.Post("/me/avatar", s.handleUploadAvatar)
+				r.Post("/change-password", s.handleChangePassword)
+			})
 		})
 
 		r.Route("/admins", func(r chi.Router) {
 			r.Post("/signup", s.handleAdminSignup)
 			r.Post("/login", s.handleAdminLogin)
+			r.With(s.requireAdminAuth).Post("/password-resets", s.handleCreatePasswordReset)
 		})
 
 		r.With(s.realtimeAuth).Get("/realtime", s.handleRealtime)
 
 		r.Route("/files", func(r chi.Router) {
 			r.With(s.requireAnyAuth).Post("/", s.handleUploadFile)
-			r.With(s.requireAdminAuth).Get("/", s.handleListFiles)
+			r.With(s.requireAnyAuth).Get("/", s.handleListFiles)
 			r.With(s.optionalAuth).Get("/{id}", s.handleServeFile)
 			r.With(s.optionalAuth).Delete("/{id}", s.handleDeleteFile)
 		})
@@ -165,7 +175,7 @@ func (s *Server) Router() http.Handler {
 		r.Route("/rag", func(r chi.Router) {
 			r.Route("/sources", func(r chi.Router) {
 				r.With(s.requireAnyAuth).Post("/", s.handleCreateRAGSource)
-				r.With(s.requireAdminAuth).Get("/", s.handleListRAGSources)
+				r.With(s.requireAnyAuth).Get("/", s.handleListRAGSources)
 				r.With(s.optionalAuth).Get("/{id}", s.handleGetRAGSource)
 				r.With(s.optionalAuth).Delete("/{id}", s.handleDeleteRAGSource)
 			})

@@ -9,8 +9,10 @@ import (
 )
 
 type authRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email     string `json:"email"`
+	Password  string `json:"password"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 type authResponse struct {
@@ -36,6 +38,8 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "weak_password", "password must be at least 8 characters", nil)
 		return
 	}
+	req.FirstName = strings.TrimSpace(req.FirstName)
+	req.LastName = strings.TrimSpace(req.LastName)
 
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
@@ -43,7 +47,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := createUser(r.Context(), s.db, req.Email, hash)
+	u, err := createUser(r.Context(), s.db, req.Email, hash, req.FirstName, req.LastName)
 	if err != nil {
 		if err == errEmailTaken {
 			writeError(w, http.StatusConflict, "email_taken", "an account with that email already exists", nil)

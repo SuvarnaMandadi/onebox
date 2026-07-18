@@ -67,9 +67,9 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, rec)
 }
 
-// handleListFiles is admin-only: it powers the dashboard's file browser.
-// Regular users have no use case for a global file listing in v0.1 (they
-// know the ids of files they uploaded).
+// handleListFiles powers both the admin dashboard's file browser (sees
+// every file) and a regular user's Home page (sees only files they
+// uploaded) — the same owner-vs-admin scoping already used for RAG chunks.
 func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	limit := defaultLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -91,7 +91,10 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		cursorCreated, cursorID = created, id
 	}
 
-	files, err := listFiles(r.Context(), s.db, limit, cursorCreated, cursorID)
+	_, isAdmin := authAdminID(r.Context())
+	ownerID, _ := authUserID(r.Context())
+
+	files, err := listFiles(r.Context(), s.db, limit, cursorCreated, cursorID, ownerID, isAdmin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to list files", nil)
 		return
@@ -110,7 +113,13 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		files = []*fileRecord{}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"items": files, "nextCursor": nextCursor})
+	total, err := countFiles(r.Context(), s.db, ownerID, isAdmin)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to count files", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": files, "nextCursor": nextCursor, "total": total})
 }
 
 func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -62,13 +63,22 @@ func setRAGSourceStatus(ctx context.Context, sqlDB *sql.DB, id, status, errMsg s
 }
 
 // listRAGSources returns up to limit+1 sources (the extra row signals
-// whether a next page exists), newest first.
-func listRAGSources(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cursorID string) ([]*ragSource, error) {
+// whether a next page exists), newest first. Admins see every source;
+// regular users see only sources they own.
+func listRAGSources(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cursorID, ownerID string, isAdmin bool) ([]*ragSource, error) {
 	stmt := `SELECT id, owner_id, file_id, filename, status, chunk_count, error, created, updated FROM _rag_sources`
+	var conds []string
 	args := []any{}
+	if !isAdmin {
+		conds = append(conds, `owner_id = ?`)
+		args = append(args, ownerID)
+	}
 	if cursorCreated != "" {
-		stmt += ` WHERE (created, id) < (?, ?)`
+		conds = append(conds, `(created, id) < (?, ?)`)
 		args = append(args, cursorCreated, cursorID)
+	}
+	if len(conds) > 0 {
+		stmt += ` WHERE ` + strings.Join(conds, " AND ")
 	}
 	stmt += ` ORDER BY created DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
@@ -91,6 +101,38 @@ func listRAGSources(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated
 		out = append(out, &s)
 	}
 	return out, rows.Err()
+}
+
+// ragSourceStatusCounts reports how many sources visible to the caller are
+// in each status ("pending", "processing", "done", "error") plus the
+// total — used by the dashboard's Home page "documents ready vs
+// processing" stat card.
+func ragSourceStatusCounts(ctx context.Context, sqlDB *sql.DB, ownerID string, isAdmin bool) (counts map[string]int, total int, err error) {
+	stmt := `SELECT status, COUNT(*) FROM _rag_sources`
+	args := []any{}
+	if !isAdmin {
+		stmt += ` WHERE owner_id = ?`
+		args = append(args, ownerID)
+	}
+	stmt += ` GROUP BY status`
+
+	rows, err := sqlDB.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count rag sources by status: %w", err)
+	}
+	defer rows.Close()
+
+	counts = map[string]int{}
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, 0, fmt.Errorf("scan status count: %w", err)
+		}
+		counts[status] = n
+		total += n
+	}
+	return counts, total, rows.Err()
 }
 
 // deleteRAGSource removes the source row (cascading to its chunks via the

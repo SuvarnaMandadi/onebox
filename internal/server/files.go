@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -66,13 +67,22 @@ func getFileByID(ctx context.Context, sqlDB *sql.DB, id string) (*fileRecord, er
 }
 
 // listFiles returns up to limit+1 files (the extra row signals whether a
-// next page exists), newest first, for the admin dashboard's file browser.
-func listFiles(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cursorID string) ([]*fileRecord, error) {
+// next page exists), newest first. Admins see every file; regular users see
+// only files they own.
+func listFiles(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cursorID, ownerID string, isAdmin bool) ([]*fileRecord, error) {
 	stmt := `SELECT id, owner_id, filename, size, mime, created FROM _files`
+	var conds []string
 	args := []any{}
+	if !isAdmin {
+		conds = append(conds, `owner_id = ?`)
+		args = append(args, ownerID)
+	}
 	if cursorCreated != "" {
-		stmt += ` WHERE (created, id) < (?, ?)`
+		conds = append(conds, `(created, id) < (?, ?)`)
 		args = append(args, cursorCreated, cursorID)
+	}
+	if len(conds) > 0 {
+		stmt += ` WHERE ` + strings.Join(conds, " AND ")
 	}
 	stmt += ` ORDER BY created DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
@@ -94,6 +104,24 @@ func listFiles(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cur
 		out = append(out, &f)
 	}
 	return out, rows.Err()
+}
+
+// countFiles reports the total number of files visible to the caller
+// (every file for an admin, only owned files otherwise) — used by the
+// dashboard's Home page stat card, which needs a total rather than one
+// page of results.
+func countFiles(ctx context.Context, sqlDB *sql.DB, ownerID string, isAdmin bool) (int, error) {
+	stmt := `SELECT COUNT(*) FROM _files`
+	args := []any{}
+	if !isAdmin {
+		stmt += ` WHERE owner_id = ?`
+		args = append(args, ownerID)
+	}
+	var n int
+	if err := sqlDB.QueryRowContext(ctx, stmt, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count files: %w", err)
+	}
+	return n, nil
 }
 
 func deleteFileRecord(ctx context.Context, sqlDB *sql.DB, id string) error {
