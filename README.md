@@ -24,6 +24,21 @@ vector store, an embeddings pipeline, auth, file storage, and LLM key
 management. onebox collapses all of that into a single binary with a clean
 admin dashboard.
 
+## Screenshots
+
+|  |  |
+|---|---|
+| ![Dashboard home page](docs/img/dashboard-home-light.png) | ![Dashboard home page, dark mode](docs/img/dashboard-home-dark.png) |
+| ![Account page](docs/img/dashboard-account-light.png) | ![Sign up page](docs/img/dashboard-signup-light.png) |
+
+The [autofill extension example](examples/autofill-extension) filling a job
+application from a resume ingested into onebox's RAG engine — a single
+`✨ Autofill with onebox` click:
+
+| Before | After |
+|---|---|
+| ![Empty job application form](docs/img/extension-autofill-before.png) | ![Job application form filled by the extension](docs/img/extension-autofill-after.png) |
+
 ## Quickstart
 
 ```bash
@@ -42,7 +57,10 @@ for a from-scratch build of a small app on top of it.
 All 6 months of the [roadmap](ROADMAP.md) are built: core server, auth,
 dynamic collections, files, realtime, the RAG engine, the LLM gateway, an
 admin dashboard, a JS/TS SDK, example apps, and release automation
-(CI, cross-platform builds, a Dockerfile). Pre-release audit in progress.
+(CI, cross-platform builds, a Dockerfile). Currently at v0.2.0 — see
+[CHANGELOG.md](CHANGELOG.md) for what's new since v0.1.0, including a
+dashboard redesign (home page, account/profile, dedicated login/signup
+pages) and DOCX ingestion.
 
 ## What's here
 
