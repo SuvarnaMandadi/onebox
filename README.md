@@ -30,10 +30,10 @@ for a from-scratch build of a small app on top of it.
 
 ## Status
 
-Months 1–5 of the [roadmap](ROADMAP.md) are built: core server, auth,
+All 6 months of the [roadmap](ROADMAP.md) are built: core server, auth,
 dynamic collections, files, realtime, the RAG engine, the LLM gateway, an
-admin dashboard, a JS/TS SDK, and example apps. Month 6 (public launch) is
-next.
+admin dashboard, a JS/TS SDK, example apps, and release automation
+(CI, cross-platform builds, a Dockerfile). Pre-release audit in progress.
 
 ## What's here
 

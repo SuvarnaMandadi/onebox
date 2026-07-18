@@ -277,6 +277,43 @@ func TestRAGAnswer(t *testing.T) {
 	}
 }
 
+// TestRAGAnswerLogsActualProvider guards against a real bug found in a
+// pre-release dry run: handleRAGAnswer hardcoded "anthropic" as the usage
+// log's provider regardless of which provider the configured model
+// actually routed to (llm.ProviderKind picks by name prefix — a non-Claude
+// AnthropicModel, e.g. an Ollama model name used for RAG answers, was
+// still logged as "anthropic", corrupting the usage/spend dashboard).
+func TestRAGAnswerLogsActualProvider(t *testing.T) {
+	srv, _ := newRAGTestServer(t)
+	srv.cfg.AnthropicModel = "llama3.2:1b" // not a "claude*" name -> routes to Ollama
+	ollamaFake := &fakeLLMClient{}
+	bundle := *srv.providers.Load()
+	bundle.llm = &llm.Router{Ollama: ollamaFake}
+	srv.providers.Store(&bundle)
+
+	_, token := signupUser(t, srv, "researcher@example.com")
+	src := uploadRAGSource(t, srv, token, "notes.txt", []byte("onebox uses sqlite for storage."))
+	waitForRAGSourceDone(t, srv, token, src["id"].(string))
+
+	rec := doAuth(t, srv, http.MethodPost, "/api/rag/answer", token, ragQueryRequest{Query: "what does onebox use for storage?", TopK: 3})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+
+	usageRec := doAuth(t, srv, http.MethodGet, "/api/usage", token, nil)
+	var usageResp struct {
+		Items []usageRecord `json:"items"`
+	}
+	json.Unmarshal(usageRec.Body.Bytes(), &usageResp)
+	if len(usageResp.Items) != 1 {
+		t.Fatalf("got %d usage records, want 1", len(usageResp.Items))
+	}
+	if usageResp.Items[0].Provider != "ollama" {
+		t.Fatalf("usage provider = %q, want %q (model %q should route to ollama, not be hardcoded to anthropic)",
+			usageResp.Items[0].Provider, "ollama", srv.cfg.AnthropicModel)
+	}
+}
+
 func TestRAGAnswerNoDocuments(t *testing.T) {
 	srv, _ := newRAGTestServer(t)
 	_, token := signupUser(t, srv, "researcher@example.com")

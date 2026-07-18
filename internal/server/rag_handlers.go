@@ -266,7 +266,7 @@ func (s *Server) handleRAGAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "LLM call failed: "+err.Error(), nil)
 		return
 	}
-	s.logUsage(r.Context(), "anthropic", s.cfg.AnthropicModel, result.TokensIn, result.TokensOut, false)
+	s.logUsage(r.Context(), llm.ProviderKind(s.cfg.AnthropicModel), s.cfg.AnthropicModel, result.TokensIn, result.TokensOut, false)
 
 	writeJSON(w, http.StatusOK, ragAnswerResponse{Answer: result.Content, Sources: chunks})
 }
