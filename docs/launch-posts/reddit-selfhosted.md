@@ -15,6 +15,13 @@ I've been building onebox, a self-hosted backend for AI apps — think
 "PocketBase, but for AI apps": one binary, SQLite storage, no external
 services required to run it.
 
+Quick example of what it enables: a [Chrome extension](examples/autofill-extension)
+that fills a job application form from a resume you upload once — the
+extension is just a regular client of onebox's own REST API (retrieve
+relevant text, then ask the LLM gateway for structured JSON), nothing
+extra running behind it. Point the LLM gateway at a local Ollama model
+and the whole thing, including the "AI" part, runs on your own hardware.
+
 **What it does:**
 - Collections (schema-defined tables) → REST CRUD + realtime SSE, like
   PocketBase
@@ -37,7 +44,7 @@ services required to run it.
 - A `Dockerfile` is included if you'd rather run it in a container
   (distroless base image, ~15MB)
 
-**Honest limitations for v0.1:** no OAuth yet (email/password only), no
+**Honest limitations for v0.2:** no OAuth yet (email/password only), no
 S3-compatible storage (local disk only), and vector search is brute-force
 cosine similarity in Go rather than a proper ANN index — fine at the
 scale of a personal project or small team's documents, not built for

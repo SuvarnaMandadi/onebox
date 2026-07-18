@@ -16,6 +16,16 @@ URL: [repo URL]
 
 Hi HN,
 
+A small demo of what this is for: I built a Chrome extension
+([examples/autofill-extension](examples/autofill-extension)) that reads a
+resume you upload once, and then fills any web form's labeled fields from
+it — click "Autofill" on a job application and it fills name, email,
+skills, education, work experience. It's just two calls to onebox's own
+REST API (`/api/rag/query` to retrieve the relevant resume text, then
+`/api/llm/chat` grounded in it, asking for structured JSON) — no separate
+backend behind the extension, no server I stood up for the demo. That's
+the pitch: this is what "one binary" gets you.
+
 I built onebox because every time I wanted to prototype an AI app, I'd
 spend the first afternoon wiring together the *same* five things: a
 database, auth, file storage, a vector store, and LLM API key
