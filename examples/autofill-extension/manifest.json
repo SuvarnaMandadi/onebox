@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "onebox Resume Autofill",
+  "version": "0.1.0",
+  "description": "Demo Chrome extension: fills web forms from a resume ingested into a onebox server's RAG engine.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "onebox Autofill"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

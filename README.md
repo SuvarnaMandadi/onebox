@@ -52,7 +52,25 @@ admin dashboard, a JS/TS SDK, example apps, and release automation
 | [`internal/`](internal) | Server, auth, RAG, LLM gateway, config, embedded admin dashboard |
 | [`sdk/js`](sdk/js) | Dependency-free JS/TS client SDK |
 | [`docs/`](docs) | Quickstart, a full tutorial, and the API reference |
-| [`examples/`](examples) | Three runnable starter apps built on the API |
+| [`examples/`](examples) | Four runnable demo apps built on the API |
+
+## Example apps
+
+Four small, runnable demos — each is just a regular client of the REST
+API (or, for the last one, a browser extension calling it), not a
+separate product with its own backend:
+
+- [`examples/docs-qa`](examples/docs-qa) — the flagship demo: upload a
+  document, ask a question, get a grounded answer with citations
+- [`examples/notes-app`](examples/notes-app) — real signup/login,
+  collections CRUD, and an LLM-gateway "summarize with AI" button
+- [`examples/support-bot`](examples/support-bot) — RAG + the LLM gateway
+  as a chat widget
+- [`examples/autofill-extension`](examples/autofill-extension) — a
+  Manifest V3 Chrome extension that fills web forms from a resume
+  ingested into onebox's RAG engine: `/api/rag/sources` to ingest,
+  `/api/rag/query` + `/api/llm/chat` (grounded in the retrieved resume
+  text, asked for structured JSON) to extract field values on any page
 
 ## Scope (v0.1)
 
