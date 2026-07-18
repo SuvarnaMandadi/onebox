@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 const defaultMaxUploadSize = 20 * 1024 * 1024 // 20 MiB
@@ -53,6 +54,14 @@ type Config struct {
 	// MonthlySpendCapUSD caps a user's estimated monthly LLM spend; 0
 	// means unlimited.
 	MonthlySpendCapUSD float64
+
+	// CORSOrigins is who may call the API from a browser. onebox is a
+	// backend *for* other frontends (a separate dev server, a static
+	// site, a mobile webview) running on a different origin, so this
+	// defaults wide open like other self-hosted BaaS tools (PocketBase,
+	// Supabase's anon key) — lock it down with ONEBOX_CORS_ORIGINS for a
+	// production deployment.
+	CORSOrigins []string
 }
 
 // Load builds a Config from environment variables, falling back to
@@ -91,7 +100,26 @@ func Load() Config {
 
 		RateLimitPerMinute: getEnvInt("ONEBOX_RATE_LIMIT_PER_MINUTE", 20),
 		MonthlySpendCapUSD: getEnvFloat("ONEBOX_MONTHLY_SPEND_CAP_USD", 5.0),
+
+		CORSOrigins: getEnvList("ONEBOX_CORS_ORIGINS", []string{"*"}),
 	}
+}
+
+func getEnvList(key string, fallback []string) []string {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 func getEnvInt(key string, fallback int) int {
