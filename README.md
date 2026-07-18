@@ -4,6 +4,15 @@
 
 One small binary: database, auth, files, vector search, RAG, and LLM gateway.
 
+<!--
+  TODO before launch: record a ~30s GIF/screenshot of the actual demo —
+  download binary -> run -> bootstrap admin -> upload a PDF -> ask a
+  question -> grounded answer with citations (see docs/quickstart.md,
+  verified to run in under two minutes end-to-end). Drop it in
+  docs/img/demo.gif and uncomment the line below.
+-->
+<!-- ![onebox demo: upload a PDF, ask a question, get a grounded answer](docs/img/demo.gif) -->
+
 ## What it is
 
 Download one file, run it, and you have a complete backend for an AI application:
