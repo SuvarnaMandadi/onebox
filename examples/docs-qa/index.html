@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>onebox example: docs Q&amp;A</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    input, button, textarea { font: inherit; padding: 0.5rem; }
+    input[type="text"], textarea { width: 100%; box-sizing: border-box; }
+    button { cursor: pointer; }
+    .muted { color: #666; font-size: 0.9rem; }
+    .answer { white-space: pre-wrap; }
+    .sources { font-size: 0.85rem; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Chat with your docs</h1>
+  <p class="muted">
+    A ~150-line example of onebox's flagship demo: upload a document, ask
+    a question, get a grounded answer. Start <code>./onebox</code> first
+    (default <code>http://localhost:8090</code>), then open this file.
+  </p>
+
+  <div class="card">
+    <strong>1. Upload a document</strong> (.pdf, .txt, or .md)
+    <div><input type="file" id="fileInput" accept=".pdf,.txt,.md" /></div>
+    <div id="uploadStatus" class="muted"></div>
+  </div>
+
+  <div class="card">
+    <strong>2. Ask a question</strong>
+    <div><input type="text" id="questionInput" placeholder="What does this document say about...?" /></div>
+    <button id="askBtn">Ask</button>
+    <div id="answer" class="answer"></div>
+    <div id="sources" class="sources"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

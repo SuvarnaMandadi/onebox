@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>onebox example: AI notes</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    input, button, textarea { font: inherit; padding: 0.5rem; }
+    input[type="text"], input[type="email"], input[type="password"], textarea { width: 100%; box-sizing: border-box; }
+    button { cursor: pointer; margin-top: 0.4rem; }
+    .muted { color: #666; font-size: 0.9rem; }
+    .note { border-bottom: 1px solid #eee; padding: 0.75rem 0; }
+    .summary { color: #2f6fed; font-size: 0.9rem; margin-top: 0.3rem; }
+    #app { display: none; }
+  </style>
+</head>
+<body>
+  <h1>AI notes</h1>
+  <p class="muted">
+    Collections CRUD + the LLM gateway. Requires a "notes" collection
+    with a required text field "body" — create it in the admin dashboard
+    or via curl first (see README).
+  </p>
+
+  <div id="auth" class="card">
+    <input type="email" id="email" placeholder="email" />
+    <input type="password" id="password" placeholder="password" />
+    <button id="loginBtn">Log in</button>
+    <button id="signupBtn">Sign up</button>
+    <div id="authStatus" class="muted"></div>
+  </div>
+
+  <div id="app">
+    <div class="card">
+      <textarea id="bodyInput" placeholder="Write a note..." rows="3"></textarea>
+      <button id="addBtn">Add note</button>
+    </div>
+    <div class="card" id="notesList"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

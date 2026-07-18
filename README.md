@@ -15,27 +15,44 @@ vector store, an embeddings pipeline, auth, file storage, and LLM key
 management. onebox collapses all of that into a single binary with a clean
 admin dashboard.
 
-## Quickstart (target experience)
+## Quickstart
 
-```
-./onebox serve
+```bash
+go build -o onebox ./cmd/onebox
+./onebox
 ```
 
-Then open `http://localhost:8090/_/` for the admin dashboard, upload a PDF,
-and ask a question about it — in under two minutes from download.
+Then open `http://localhost:8090/_/` for the admin dashboard. See
+[docs/quickstart.md](docs/quickstart.md) for the full two-minute walkthrough
+(bootstrap admin → set provider keys → upload a PDF → get a grounded answer),
+or [docs/tutorial-chat-with-your-docs.md](docs/tutorial-chat-with-your-docs.md)
+for a from-scratch build of a small app on top of it.
 
 ## Status
 
-Early development. See [ROADMAP.md](ROADMAP.md) for the build plan.
+Months 1–5 of the [roadmap](ROADMAP.md) are built: core server, auth,
+dynamic collections, files, realtime, the RAG engine, the LLM gateway, an
+admin dashboard, a JS/TS SDK, and example apps. Month 6 (public launch) is
+next.
+
+## What's here
+
+| | |
+|---|---|
+| [`cmd/onebox`](cmd/onebox) | The binary's entrypoint |
+| [`internal/`](internal) | Server, auth, RAG, LLM gateway, config, embedded admin dashboard |
+| [`sdk/js`](sdk/js) | Dependency-free JS/TS client SDK |
+| [`docs/`](docs) | Quickstart, a full tutorial, and the API reference |
+| [`examples/`](examples) | Three runnable starter apps built on the API |
 
 ## Scope (v0.1)
 
 - **Core server** — single Go binary, HTTP server, config, migrations, admin dashboard
 - **Data** — collections (tables) with typed fields, CRUD REST API, realtime subscriptions
-- **Auth** — email/password, JWT sessions, OAuth (Google + GitHub), per-collection access rules
-- **Files** — upload, store, serve files (local disk first, S3-compatible later)
-- **RAG engine** — ingest PDF/TXT/MD, chunk, embed, store vectors, semantic search
-- **LLM gateway** — provider-agnostic `/chat` endpoint (Anthropic, OpenAI, Ollama), caching, per-user rate/spend limits
+- **Auth** — email/password, JWT sessions, per-collection access rules (public/authenticated/owner)
+- **Files** — upload, store, serve files (local disk)
+- **RAG engine** — ingest PDF/TXT/MD, chunk, embed, brute-force cosine-similarity search (see [ROADMAP.md](ROADMAP.md) for why not sqlite-vec)
+- **LLM gateway** — provider-agnostic `/api/llm/chat` (Anthropic, OpenAI, Ollama), streaming, caching, per-user rate/spend limits, usage logging
 
 ## Explicitly out of scope for v0.1
 
