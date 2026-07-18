@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +156,50 @@ func TestRAGIngestAndQuery(t *testing.T) {
 	}
 }
 
+// TestRAGIngestDOCX uploads a real .docx (headings, paragraphs, and a
+// table — see internal/server/testdata/sample.docx) through the actual
+// /api/rag/sources endpoint and confirms the extracted table content
+// made it all the way through extraction, chunking, and storage.
+func TestRAGIngestDOCX(t *testing.T) {
+	srv, _ := newRAGTestServer(t)
+	_, token := signupUser(t, srv, "researcher@example.com")
+
+	content, err := os.ReadFile("testdata/sample.docx")
+	if err != nil {
+		t.Fatalf("read testdata/sample.docx: %v", err)
+	}
+
+	src := uploadRAGSource(t, srv, token, "sample.docx", content)
+	done := waitForRAGSourceDone(t, srv, token, src["id"].(string))
+	if done["chunk_count"].(float64) < 1 {
+		t.Fatalf("chunk_count = %v, want >= 1", done["chunk_count"])
+	}
+
+	rec := doAuth(t, srv, http.MethodPost, "/api/rag/query", token, ragQueryRequest{Query: "pricing table", TopK: 5})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query failed: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Results []ragScoredChunk `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode query response: %v", err)
+	}
+
+	var allText string
+	for _, r := range resp.Results {
+		allText += r.Text
+	}
+	for _, want := range []string{"Refund Policy", "Monthly Price", "Starter", "$19", "Pro", "$49"} {
+		if !strings.Contains(allText, want) {
+			t.Errorf("ingested/retrieved text missing %q; got chunks: %q", want, allText)
+		}
+	}
+}
+
+// TestRAGUnsupportedFileType checks not just that an unsupported upload is
+// rejected, but that the rejection is a clear, actionable error — never a
+// silent failure — naming every format that IS supported.
 func TestRAGUnsupportedFileType(t *testing.T) {
 	srv, _ := newRAGTestServer(t)
 	_, token := signupUser(t, srv, "researcher@example.com")
@@ -166,6 +211,25 @@ func TestRAGUnsupportedFileType(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var env errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if env.Code != "unsupported_type" {
+		t.Fatalf("code = %q, want %q", env.Code, "unsupported_type")
+	}
+	if !strings.Contains(env.Message, ".exe") {
+		t.Errorf("message should name the rejected extension, got: %q", env.Message)
+	}
+	for _, ext := range supportedRAGExtensionsList {
+		if !strings.Contains(env.Message, ext) {
+			t.Errorf("message should list supported extension %q, got: %q", ext, env.Message)
+		}
+	}
+	if env.Details == nil {
+		t.Error("expected structured details (received/supported) alongside the message, got nil")
 	}
 }
 

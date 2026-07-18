@@ -59,7 +59,7 @@ List query params: `filter=field=value,field2=value2` (equality, ANDed),
 
 | Endpoint | Method | Auth | Body |
 |---|---|---|---|
-| `/api/rag/sources` | POST (multipart, field `file`) | any signed-in user or admin | `.pdf`/`.txt`/`.md` only |
+| `/api/rag/sources` | POST (multipart, field `file`) | any signed-in user or admin | `.pdf`/`.txt`/`.md`/`.docx` only |
 | `/api/rag/sources` | GET | admin only | — |
 | `/api/rag/sources/:id` | GET | owner or admin | — |
 | `/api/rag/sources/:id` | DELETE | owner or admin | — |

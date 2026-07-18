@@ -23,8 +23,8 @@ step, no framework.
    # or: npx serve .
    ```
 
-3. Open `http://localhost:5500`, upload a `.pdf`/`.txt`/`.md`, wait for
-   ingestion to finish, and ask a question.
+3. Open `http://localhost:5500`, upload a `.pdf`/`.txt`/`.md`/`.docx`, wait
+   for ingestion to finish, and ask a question.
 
 ## How it works
 

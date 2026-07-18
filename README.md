@@ -60,7 +60,7 @@ admin dashboard, a JS/TS SDK, example apps, and release automation
 - **Data** — collections (tables) with typed fields, CRUD REST API, realtime subscriptions
 - **Auth** — email/password, JWT sessions, per-collection access rules (public/authenticated/owner)
 - **Files** — upload, store, serve files (local disk)
-- **RAG engine** — ingest PDF/TXT/MD, chunk, embed, brute-force cosine-similarity search (see [ROADMAP.md](ROADMAP.md) for why not sqlite-vec)
+- **RAG engine** — ingest PDF/TXT/MD/DOCX, chunk, embed, brute-force cosine-similarity search (see [ROADMAP.md](ROADMAP.md) for why not sqlite-vec)
 - **LLM gateway** — provider-agnostic `/api/llm/chat` (Anthropic, OpenAI, Ollama), streaming, caching, per-user rate/spend limits, usage logging
 
 ## Explicitly out of scope for v0.1

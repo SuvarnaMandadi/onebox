@@ -34,7 +34,9 @@ func (s *Server) handleCreateRAGSource(w http.ResponseWriter, r *http.Request) {
 
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	if !supportedRAGExtensions[ext] {
-		writeError(w, http.StatusBadRequest, "unsupported_type", "supported types: .pdf, .txt, .md", nil)
+		writeError(w, http.StatusBadRequest, "unsupported_type",
+			fmt.Sprintf("unsupported file type %q — supported types: %s", ext, strings.Join(supportedRAGExtensionsList, ", ")),
+			map[string]any{"received": ext, "supported": supportedRAGExtensionsList})
 		return
 	}
 

@@ -486,7 +486,7 @@ async function renderFiles(container) {
 async function renderRAGSources(container) {
   container.appendChild(el("h2", { text: "RAG sources" }));
 
-  const fileInput = el("input", { type: "file", accept: ".pdf,.txt,.md" });
+  const fileInput = el("input", { type: "file", accept: ".pdf,.txt,.md,.docx" });
   const uploadStatus = el("div", { class: "error" });
   const table = el("table", {}, [
     el(
@@ -577,7 +577,7 @@ async function renderRAGSources(container) {
   container.appendChild(
     el("div", { class: "card" }, [
       el("div", { class: "row" }, [fileInput, uploadBtn]),
-      el("p", { class: "muted", text: "Accepts .pdf, .txt, .md — ingestion runs in the background." }),
+      el("p", { class: "muted", text: "Accepts .pdf, .txt, .md, .docx — ingestion runs in the background." }),
       uploadStatus,
     ])
   );

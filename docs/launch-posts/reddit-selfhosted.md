@@ -20,7 +20,7 @@ services required to run it.
   PocketBase
 - Email/password auth with per-collection access rules
 - File uploads (stored on local disk)
-- A RAG engine: upload PDF/TXT/MD, it's chunked + embedded in the
+- A RAG engine: upload PDF/TXT/MD/DOCX, it's chunked + embedded in the
   background, then you can ask questions grounded in your own documents
 - An LLM gateway that proxies to Anthropic, OpenAI, **or a local Ollama
   instance** — so you can run the LLM side fully locally too, if you'd

@@ -28,7 +28,7 @@ onebox is a single Go binary that does all of it:
 - Email/password auth with per-collection access rules
   (public/authenticated/owner)
 - File upload/storage
-- A RAG engine: upload a PDF/TXT/MD, it gets chunked and embedded in the
+- A RAG engine: upload a PDF/TXT/MD/DOCX, it gets chunked and embedded in the
   background, then `/api/rag/answer` gives you a grounded answer with
   citations
 - An LLM gateway: one `/api/llm/chat` endpoint routes to Anthropic,

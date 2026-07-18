@@ -29,7 +29,7 @@ the actual product.
 - Collections with typed fields → instant REST CRUD + realtime SSE
 - Email/password auth, per-collection access rules
 - File uploads
-- RAG: PDF/TXT/MD ingestion → chunk → embed → cosine-similarity search
+- RAG: PDF/TXT/MD/DOCX ingestion → chunk → embed → cosine-similarity search
   → grounded LLM answers with citations
 - LLM gateway: one endpoint, three providers, response caching, rate
   limits, spend caps, usage logging
