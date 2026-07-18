@@ -106,6 +106,17 @@ func TestCreateCollection(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "invalid_collection",
 		},
+		{
+			// Real user-reported bug: collection/field names with capital
+			// letters (e.g. "Posts", "userEmail") were rejected outright.
+			name:     "allows mixed-case collection and field names",
+			useAdmin: true,
+			body: createCollectionRequest{
+				Name:   "Posts",
+				Schema: Schema{Fields: []Field{{Name: "userEmail", Type: FieldText, Required: true}}},
+			},
+			wantStatus: http.StatusCreated,
+		},
 	}
 
 	for _, tt := range tests {

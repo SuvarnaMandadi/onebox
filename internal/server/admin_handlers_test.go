@@ -86,3 +86,19 @@ func TestAdminLogin(t *testing.T) {
 		})
 	}
 }
+
+// TestAdminLoginMixedCaseEmail mirrors TestLoginMixedCaseEmail for admins —
+// the same user-reported case-sensitivity bug applies to admin accounts.
+func TestAdminLoginMixedCaseEmail(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	signupRec := doJSON(t, srv, http.MethodPost, "/api/admins/signup", authRequest{Email: "Root@Example.com", Password: "hunter22222"})
+	if signupRec.Code != http.StatusCreated {
+		t.Fatalf("signup failed: status = %d, body = %s", signupRec.Code, signupRec.Body.String())
+	}
+
+	loginRec := doJSON(t, srv, http.MethodPost, "/api/admins/login", authRequest{Email: "ROOT@EXAMPLE.COM", Password: "hunter22222"})
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200, body = %s", loginRec.Code, loginRec.Body.String())
+	}
+}

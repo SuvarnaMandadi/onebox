@@ -301,3 +301,50 @@ func TestJSONFieldRoundTrip(t *testing.T) {
 		t.Fatalf("meta.priority = %v, want 2", gotMeta["priority"])
 	}
 }
+
+// TestMixedCaseCollectionFieldsAndValues is an end-to-end regression test
+// for a real user-reported bug: capital letters were rejected in
+// collection names and field names (over-strict regex), even though field
+// *values* were never restricted. Exercises capitals in all three: the
+// collection name, a field name, and the value written to it.
+func TestMixedCaseCollectionFieldsAndValues(t *testing.T) {
+	srv, _ := newTestServer(t)
+	adminToken := bootstrapAdmin(t, srv)
+
+	createRec := doAuth(t, srv, http.MethodPost, "/api/collections", adminToken, createCollectionRequest{
+		Name: "JobApplications",
+		Schema: Schema{Fields: []Field{
+			{Name: "candidateName", Type: FieldText, Required: true},
+			{Name: "Status", Type: FieldText},
+		}},
+		Rules: DefaultRules(),
+	})
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create collection failed: status = %d, body = %s", createRec.Code, createRec.Body.String())
+	}
+
+	_, userToken := signupUser(t, srv, "Recruiter@Example.com")
+
+	createRecordRec := doAuth(t, srv, http.MethodPost, "/api/collections/JobApplications/records", userToken, map[string]any{
+		"candidateName": "Suvarna Mandadi",
+		"Status":        "Interviewing",
+	})
+	if createRecordRec.Code != http.StatusCreated {
+		t.Fatalf("create record failed: status = %d, body = %s", createRecordRec.Code, createRecordRec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(createRecordRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created record: %v", err)
+	}
+	if created["candidateName"] != "Suvarna Mandadi" {
+		t.Fatalf("candidateName = %v, want %q", created["candidateName"], "Suvarna Mandadi")
+	}
+	if created["Status"] != "Interviewing" {
+		t.Fatalf("Status = %v, want %q", created["Status"], "Interviewing")
+	}
+
+	listRec := doAuth(t, srv, http.MethodGet, "/api/collections/JobApplications/records", userToken, nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list failed: status = %d, body = %s", listRec.Code, listRec.Body.String())
+	}
+}

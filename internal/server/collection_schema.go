@@ -92,7 +92,13 @@ func DefaultRules() Rules {
 	}
 }
 
-var nameRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+// nameRE allows mixed-case collection/field names (e.g. "Posts", "userEmail")
+// — only the leading-letter and character-set shape matters for a valid
+// SQL identifier, not case. SQLite is case-sensitive for exact-match
+// lookups on TEXT columns, so a collection created as "Notes" must be
+// referenced as "Notes" (not "notes") — that's normal, expected behavior,
+// not something this regex needs to solve.
+var nameRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,62}$`)
 
 // systemColumns are present on every dynamic collection table and cannot be
 // redeclared as user fields.

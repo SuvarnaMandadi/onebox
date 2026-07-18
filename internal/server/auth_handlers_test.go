@@ -114,6 +114,30 @@ func TestSignup(t *testing.T) {
 	}
 }
 
+// TestSignupMixedCaseEmailIsSameAccount guards against a real user-reported
+// bug: signing up with two different casings of the same email must not
+// create two accounts.
+func TestSignupMixedCaseEmailIsSameAccount(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	first := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "Suvarna@Example.com", Password: "hunter22222"})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first signup failed: status = %d, body = %s", first.Code, first.Body.String())
+	}
+
+	second := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "suvarna@example.com", Password: "hunter22222"})
+	if second.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (same account under a different case), body = %s", second.Code, second.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(second.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if env.Code != "email_taken" {
+		t.Fatalf("code = %q, want %q", env.Code, "email_taken")
+	}
+}
+
 func TestLogin(t *testing.T) {
 	const seedEmail = "user@example.com"
 	const seedPassword = "correct-password"
@@ -151,6 +175,45 @@ func TestLogin(t *testing.T) {
 				if resp.Token == "" {
 					t.Fatal("expected non-empty token")
 				}
+			}
+		})
+	}
+}
+
+// TestLoginMixedCaseEmail guards against a real user-reported bug: signing
+// up as "Suvarna@X.com" and logging in as "suvarna@x.com" (or any other
+// casing) must succeed — email identity is case-insensitive everywhere.
+func TestLoginMixedCaseEmail(t *testing.T) {
+	tests := []struct {
+		name        string
+		signupEmail string
+		loginEmail  string
+	}{
+		{name: "login lowercase after mixed-case signup", signupEmail: "Suvarna@X.com", loginEmail: "suvarna@x.com"},
+		{name: "login mixed-case after lowercase signup", signupEmail: "suvarna@x.com", loginEmail: "Suvarna@X.com"},
+		{name: "login uppercase after mixed-case signup", signupEmail: "Suvarna@X.com", loginEmail: "SUVARNA@X.COM"},
+		{name: "login with incidental whitespace", signupEmail: "suvarna@x.com", loginEmail: "  Suvarna@X.com  "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := newTestServer(t)
+
+			signupRec := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: tt.signupEmail, Password: "hunter22222"})
+			if signupRec.Code != http.StatusCreated {
+				t.Fatalf("signup failed: status = %d, body = %s", signupRec.Code, signupRec.Body.String())
+			}
+
+			loginRec := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: tt.loginEmail, Password: "hunter22222"})
+			if loginRec.Code != http.StatusOK {
+				t.Fatalf("login status = %d, want 200, body = %s", loginRec.Code, loginRec.Body.String())
+			}
+			var resp authResponse
+			if err := json.Unmarshal(loginRec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp.Token == "" {
+				t.Fatal("expected non-empty token")
 			}
 		})
 	}
