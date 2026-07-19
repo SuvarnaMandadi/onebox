@@ -69,10 +69,15 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		result = testOllamaConnection(r.Context(), baseURL)
 	case "embedding":
 		embeddingProvider := fallback(settingEmbeddingProvider, req.EmbeddingProvider, "openai")
-		if embeddingProvider == "ollama" {
+		switch embeddingProvider {
+		case "ollama":
 			baseURL := fallback(settingOllamaBaseURL, req.BaseURL, "http://localhost:11434")
 			result = testOllamaConnection(r.Context(), baseURL)
-		} else {
+		case "voyage":
+			apiKey := fallback(settingEmbeddingAPIKey, req.APIKey, "")
+			baseURL := fallback(settingEmbeddingBaseURL, req.BaseURL, "https://api.voyageai.com/v1")
+			result = testOpenAICompatConnection(r.Context(), "Voyage AI", baseURL, apiKey)
+		default:
 			apiKey := fallback(settingEmbeddingAPIKey, req.APIKey, "")
 			baseURL := fallback(settingEmbeddingBaseURL, req.BaseURL, "https://api.openai.com/v1")
 			result = testOpenAICompatConnection(r.Context(), "Embedding provider", baseURL, apiKey)

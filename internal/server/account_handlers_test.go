@@ -360,3 +360,50 @@ func TestRegenerateRecoveryPhraseForAdmin(t *testing.T) {
 func splitFields(s string) []string {
 	return strings.Fields(s)
 }
+
+// TestAvatarHiddenFromFileListing covers the hand-tested feedback that
+// profile photos must never show up in File Storage: an avatar upload
+// must not appear in GET /api/files, and removing it (not deleting via
+// the Files list, which can't even see it) must revert to initials.
+func TestAvatarHiddenFromFileListing(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+	_, token := signupUser(t, srv, "avatarhidden@example.com")
+
+	// A regular file upload should still show up.
+	req := multipartUploadRequest(t, "/api/files", "file", "regular.txt", []byte("hello"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload regular file: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	avatarReq := multipartUploadRequest(t, "/api/auth/me/avatar", "file", "face.png",
+		[]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"))
+	avatarReq.Header.Set("Authorization", "Bearer "+token)
+	avatarRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(avatarRec, avatarReq)
+	if avatarRec.Code != http.StatusOK {
+		t.Fatalf("upload avatar: status = %d, body = %s", avatarRec.Code, avatarRec.Body.String())
+	}
+
+	listRec := doAuth(t, srv, http.MethodGet, "/api/files", token, nil)
+	var listResp struct {
+		Items []fileRecord `json:"items"`
+		Total int          `json:"total"`
+	}
+	json.Unmarshal(listRec.Body.Bytes(), &listResp)
+	if listResp.Total != 1 || len(listResp.Items) != 1 {
+		t.Fatalf("expected only the regular file in the listing, got total=%d items=%d", listResp.Total, len(listResp.Items))
+	}
+
+	removeRec := doAuth(t, srv, http.MethodDelete, "/api/auth/me/avatar", token, nil)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("remove avatar: status = %d, body = %s", removeRec.Code, removeRec.Body.String())
+	}
+	var removed user
+	json.Unmarshal(removeRec.Body.Bytes(), &removed)
+	if removed.AvatarFileID != "" {
+		t.Fatalf("expected avatar_file_id to be cleared, got %q", removed.AvatarFileID)
+	}
+}

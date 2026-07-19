@@ -33,12 +33,12 @@ function initials(nameOrEmail) {
   return trimmed.slice(0, 2).toUpperCase();
 }
 
+// displayName never falls back to the email prefix — an email address is
+// not a name, and showing one read as a bug (hand-tested feedback).
 function displayName(account) {
   if (!account) return "";
-  const full = [account.first_name, account.last_name].filter(Boolean).join(" ").trim();
-  if (full) return full;
-  if (account.email) return account.email.split("@")[0];
-  return "";
+  if (account.display_name) return account.display_name;
+  return [account.first_name, account.last_name].filter(Boolean).join(" ").trim();
 }
 
 // avatarBlobCache maps a file id to an object URL — avatar images are
@@ -299,6 +299,56 @@ fetch("/api/health")
   })
   .catch(() => {});
 
+// The floating admin chatbot — built once at load (its container is
+// hidden/shown per role by applyRoleVisibility, not re-built on every
+// navigate() call).
+(function initChatbot() {
+  const root = document.getElementById("chatbotRoot");
+  const fab = el("button", { type: "button", class: "chatbot-fab", title: "Ask about this onebox instance" }, "💬");
+  const log = el("div", { class: "chatbot-log" });
+  const input = el("input", { type: "text", placeholder: "Ask a question…" });
+  const sendBtn = el("button", { type: "submit", text: "Send" });
+  const form = el("form", { class: "chatbot-form" }, [input, sendBtn]);
+  const panel = el("div", { class: "chatbot-panel hidden" }, [
+    el("div", { class: "chatbot-panel-header" }, [
+      "Ask about your OneBox",
+      el("button", { type: "button", class: "link-btn", text: "✕", onclick: () => panel.classList.add("hidden") }),
+    ]),
+    log,
+    form,
+  ]);
+
+  function appendMsg(role, text) {
+    log.appendChild(el("div", { class: "chatbot-msg " + role, text }));
+    log.scrollTop = log.scrollHeight;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message) return;
+    appendMsg("user", message);
+    input.value = "";
+    input.disabled = true;
+    try {
+      const resp = await api("/api/chat", { method: "POST", body: JSON.stringify({ message }) });
+      appendMsg("assistant", resp.reply);
+    } catch (err) {
+      appendMsg("assistant", err.message);
+    }
+    input.disabled = false;
+    input.focus();
+  });
+
+  fab.addEventListener("click", () => {
+    panel.classList.toggle("hidden");
+    if (!panel.classList.contains("hidden")) input.focus();
+  });
+
+  root.appendChild(panel);
+  root.appendChild(fab);
+})();
+
 document.getElementById("logoutBtn").addEventListener("click", () => {
   clearToken();
   clearRole();
@@ -333,6 +383,7 @@ function applyRoleVisibility() {
   document.querySelectorAll('[data-role="admin"]').forEach((node) => {
     node.classList.toggle("locked", !admin);
   });
+  document.getElementById("chatbotRoot").classList.toggle("hidden", !admin);
 }
 
 // Sidebar nav links are only ever rendered once (in index.html), so their
@@ -418,6 +469,12 @@ async function navigate() {
     } else if (parts[0] === "usage") {
       updateActiveNav("usage");
       await renderUsage(app);
+    } else if (parts[0] === "logs") {
+      updateActiveNav("logs");
+      await renderLogs(app);
+    } else if (parts[0] === "backups") {
+      updateActiveNav("backups");
+      await renderBackups(app);
     } else if (parts[0] === "settings") {
       updateActiveNav("settings");
       await renderSettings(app);
@@ -929,12 +986,12 @@ function timeAgo(iso) {
 async function renderHome(container) {
   const account = await loadAccount();
   const admin = isAdminRole();
-  const greetingName = admin ? (account && account.email ? account.email.split("@")[0] : "there") : displayName(account) || "there";
-  const hourGreeting = new Date().getHours() < 12 ? "Hi" : "Welcome back";
+  const name = displayName(account);
+  const heroGreeting = name ? (new Date().getHours() < 12 ? "Hi" : "Welcome back") + ", " + name : "Hi there";
 
   container.appendChild(
     el("div", { class: "hero" }, [
-      el("div", { class: "hero-greeting", text: hourGreeting + ", " + greetingName }),
+      el("div", { class: "hero-greeting", text: heroGreeting }),
       el("div", { class: "hero-tagline", text: "Your entire AI backend in one box" }),
     ])
   );
@@ -1058,13 +1115,26 @@ async function renderAccount(container) {
       throw e;
     }
   });
+  const removeAvatarBtn = actionButton("Remove photo", { class: "btn-secondary", loadingLabel: "Removing..." }, async () => {
+    clear(avatarStatus);
+    try {
+      const updated = await api(avatarEndpoint, { method: "DELETE" });
+      accountCache = updated;
+      fillAvatarNode(avatarSlot, updated);
+      toastSuccess("Profile photo removed");
+      refreshAccountSummary();
+    } catch (e) {
+      avatarStatus.textContent = e.message;
+      throw e;
+    }
+  });
 
   container.appendChild(
     el("div", { class: "card" }, [
       el("div", { class: "avatar-upload-row" }, [
         avatarSlot,
         el("div", { class: "col", style: "gap:6px" }, [
-          el("div", { class: "row" }, [avatarInput, avatarBtn]),
+          el("div", { class: "row" }, [avatarInput, avatarBtn, removeAvatarBtn]),
           el("div", { class: "muted", style: "font-size:0.8rem", text: "PNG or JPG. Shows your initials until you upload one." }),
           avatarStatus,
         ]),
@@ -1072,6 +1142,7 @@ async function renderAccount(container) {
     ])
   );
 
+  const displayNameInput = el("input", { type: "text", value: account.display_name || "", placeholder: "optional — overrides first/last name in greetings" });
   const firstName = el("input", { type: "text", value: account.first_name || "", autocomplete: "given-name" });
   const lastName = el("input", { type: "text", value: account.last_name || "", autocomplete: "family-name" });
   const phone = el("input", { type: "tel", value: account.phone || "", autocomplete: "tel", placeholder: "optional" });
@@ -1082,6 +1153,7 @@ async function renderAccount(container) {
       el("label", { style: "flex:1" }, ["First name", firstName]),
       el("label", { style: "flex:1" }, ["Last name", lastName]),
     ]),
+    el("label", {}, ["Display name (optional)", displayNameInput]),
   ];
   let email;
   if (admin) {
@@ -1095,7 +1167,7 @@ async function renderAccount(container) {
   const saveProfileBtn = actionButton("Save changes", { loadingLabel: "Saving..." }, async () => {
     clear(profileStatus);
     try {
-      const body = { first_name: firstName.value.trim(), last_name: lastName.value.trim(), phone: phone.value.trim() };
+      const body = { first_name: firstName.value.trim(), last_name: lastName.value.trim(), display_name: displayNameInput.value.trim(), phone: phone.value.trim() };
       if (!admin) body.email = email.value.trim();
       const updated = await api(admin ? "/api/admins/me" : "/api/auth/me", { method: "PATCH", body: JSON.stringify(body) });
       accountCache = updated;
@@ -1372,10 +1444,27 @@ async function renderRecords(container, name) {
     if (!loadedAny) { tableCard.classList.add("hidden"); emptyCard.classList.remove("hidden"); }
   }
 
-  container.appendChild(tableCard);
-  container.appendChild(emptyCard);
-  container.appendChild(renderCreateRecordForm(name, fields, upsertRow));
-  container.appendChild(status);
+  const recordsPane = el("div", {}, [tableCard, emptyCard, renderCreateRecordForm(name, fields, upsertRow), status]);
+  const apiPane = el("div", { class: "hidden" }, [renderAPISnippets(name, fields)]);
+
+  const recordsTabBtn = el("button", { type: "button", class: "btn-secondary active", text: "Records" });
+  const apiTabBtn = el("button", { type: "button", class: "btn-secondary", text: "API" });
+  recordsTabBtn.addEventListener("click", () => {
+    recordsTabBtn.classList.add("active");
+    apiTabBtn.classList.remove("active");
+    recordsPane.classList.remove("hidden");
+    apiPane.classList.add("hidden");
+  });
+  apiTabBtn.addEventListener("click", () => {
+    apiTabBtn.classList.add("active");
+    recordsTabBtn.classList.remove("active");
+    apiPane.classList.remove("hidden");
+    recordsPane.classList.add("hidden");
+  });
+
+  container.appendChild(el("div", { class: "row", style: "margin-bottom:12px" }, [recordsTabBtn, apiTabBtn]));
+  container.appendChild(recordsPane);
+  container.appendChild(apiPane);
 
   await loadPage();
 
@@ -1397,6 +1486,68 @@ async function renderRecords(container, name) {
     upsertRow(evt.record);
   });
   window.addEventListener("hashchange", () => sse.close(), { once: true });
+}
+
+// renderAPISnippets builds ready-to-copy curl + JS-SDK snippets for the
+// four record operations on this collection (PocketBase-style "API
+// preview"), using an example payload derived from the collection's own
+// schema so the snippets are directly runnable, not just a generic shape.
+function renderAPISnippets(name, fields) {
+  const exampleObj = {};
+  for (const f of fields) {
+    if (f.type === "number") exampleObj[f.name] = 1;
+    else if (f.type === "bool") exampleObj[f.name] = true;
+    else if (f.type === "json") exampleObj[f.name] = {};
+    else if (f.type === "date") exampleObj[f.name] = new Date().toISOString();
+    else exampleObj[f.name] = "example";
+  }
+  const exampleJSON = JSON.stringify(exampleObj);
+  const base = location.origin;
+  const enc = encodeURIComponent(name);
+
+  const snippets = [
+    {
+      title: "List records",
+      curl: `curl "${base}/api/collections/${enc}/records" \\\n  -H "Authorization: Bearer $TOKEN"`,
+      js: `const { items } = await client.records("${name}").list();`,
+    },
+    {
+      title: "Create a record",
+      curl: `curl -X POST "${base}/api/collections/${enc}/records" \\\n  -H "Authorization: Bearer $TOKEN" \\\n  -H "Content-Type: application/json" \\\n  -d '${exampleJSON}'`,
+      js: `const record = await client.records("${name}").create(${exampleJSON});`,
+    },
+    {
+      title: "Update a record",
+      curl: `curl -X PATCH "${base}/api/collections/${enc}/records/RECORD_ID" \\\n  -H "Authorization: Bearer $TOKEN" \\\n  -H "Content-Type: application/json" \\\n  -d '${exampleJSON}'`,
+      js: `const record = await client.records("${name}").update("RECORD_ID", ${exampleJSON});`,
+    },
+    {
+      title: "Delete a record",
+      curl: `curl -X DELETE "${base}/api/collections/${enc}/records/RECORD_ID" \\\n  -H "Authorization: Bearer $TOKEN"`,
+      js: `await client.records("${name}").delete("RECORD_ID");`,
+    },
+  ];
+
+  const cards = snippets.map((s) => {
+    function codeBlock(label, code) {
+      const pre = el("pre", { class: "api-snippet", text: code });
+      const copyBtn = el("button", {
+        type: "button",
+        class: "link-btn",
+        text: "Copy",
+        onclick: () => {
+          navigator.clipboard.writeText(code).then(() => toastSuccess(label + " copied"));
+        },
+      });
+      return el("div", {}, [el("div", { class: "row", style: "justify-content:space-between" }, [el("span", { class: "muted", text: label }), copyBtn]), pre]);
+    }
+    return el("div", { class: "card" }, [el("h3", { text: s.title }), codeBlock("curl", s.curl), codeBlock("JS SDK", s.js)]);
+  });
+
+  return el("div", {}, [
+    el("p", { class: "muted", text: "$TOKEN is a session token from /api/auth/login or /api/admins/login. client is a onebox-js OneboxClient instance." }),
+    ...cards,
+  ]);
 }
 
 function renderCreateRecordForm(collectionName, fields, onCreated) {
@@ -1454,7 +1605,7 @@ function renderCreateRecordForm(collectionName, fields, onCreated) {
 // -- files ---------------------------------------------------------------
 
 async function renderFiles(container) {
-  container.appendChild(el("h2", { text: "Files" }));
+  container.appendChild(el("h2", { text: "File Storage" }));
 
   const fileInput = el("input", { type: "file" });
   const uploadStatus = el("div", { class: "error-text" });
@@ -1802,6 +1953,49 @@ async function renderUsage(container) {
   container.appendChild(el("div", { class: "card" }, [table]));
 }
 
+// renderChatSharePanel lets an admin publish a public, unauthenticated
+// chat page (GET /chat/:token — a standalone page, not part of this SPA)
+// that answers questions about this onebox instance. Disabling or
+// regenerating immediately revokes whichever link was out there before.
+function renderChatSharePanel() {
+  const body = el("div", { class: "col" }, [el("p", { class: "muted", text: "Loading…" })]);
+
+  async function load() {
+    const status = await api("/api/chat-share");
+    clear(body);
+    if (!status.enabled) {
+      const enableBtn = actionButton("Enable public chat link", { class: "btn-secondary" }, async () => {
+        await api("/api/chat-share/enable", { method: "POST" });
+        toastSuccess("Public chat link enabled");
+        await load();
+      });
+      body.appendChild(enableBtn);
+      return;
+    }
+    const urlInput = el("input", { readonly: "readonly", value: status.url, onclick: (e) => e.target.select() });
+    const disableBtn = deleteButton("Disable", "Disable the public chat link? The current link stops working immediately.", async () => {
+      await api("/api/chat-share/disable", { method: "POST" });
+      toastSuccess("Public chat link disabled");
+      await load();
+    });
+    const regenBtn = actionButton("Regenerate link", { class: "btn-secondary" }, async () => {
+      await api("/api/chat-share/regenerate", { method: "POST" });
+      toastSuccess("Link regenerated — the old one no longer works");
+      await load();
+    });
+    body.appendChild(el("label", {}, ["Shareable link", urlInput]));
+    body.appendChild(el("div", { class: "row" }, [regenBtn, disableBtn]));
+  }
+
+  load();
+
+  return el("div", { class: "card" }, [
+    el("h3", { text: "Public chat link" }),
+    el("p", { class: "muted", text: "A standalone page anyone with the link can use to ask questions about this onebox instance — no login, no frontend code needed. Grounded in your collection names/counts, not raw record data." }),
+    body,
+  ]);
+}
+
 // renderPasswordResetPanel is the admin-side half of the password-reset
 // flow: since onebox doesn't send email yet, an admin looks up a user by
 // email here and gets a one-time token + expiry back to hand them out of
@@ -1839,6 +2033,221 @@ function renderPasswordResetPanel() {
     el("h3", { text: "Reset a user's password" }),
     el("p", { class: "muted", text: "onebox has no SMTP integration yet, so users can't request a reset email themselves. Generate a one-time token here and share it with them directly — they redeem it on the dashboard's \"forgot password\" page." }),
     el("div", { class: "col" }, [el("label", {}, ["User email", email]), submitBtn, status, result]),
+  ]);
+}
+
+// -- logs ------------------------------------------------------------------
+
+async function renderLogs(container) {
+  container.appendChild(el("h2", {}, ["📜 Logs"]));
+
+  const statusFilter = el("input", { type: "text", placeholder: "status (e.g. 404)", style: "max-width:160px" });
+  const pathFilter = el("input", { type: "text", placeholder: "path contains…", style: "max-width:220px" });
+  const table = el("table", {}, [
+    el(
+      "thead",
+      {},
+      el("tr", {}, [
+        el("th", { text: "Time" }),
+        el("th", { text: "Method" }),
+        el("th", { text: "Path" }),
+        el("th", { text: "Status" }),
+        el("th", { text: "User" }),
+        el("th", { text: "Duration" }),
+      ])
+    ),
+  ]);
+  const tbody = el("tbody");
+  table.appendChild(tbody);
+  const tableCard = el("div", { class: "card" }, [table]);
+  const emptyCard = emptyState("📜", "No requests logged yet", "API requests will show up here as they happen.");
+  emptyCard.classList.add("hidden");
+
+  function statusBadgeClass(status) {
+    if (status >= 500) return "badge-error";
+    if (status >= 400) return "badge-pending";
+    return "badge-done";
+  }
+
+  async function load() {
+    clear(tbody);
+    const qs = new URLSearchParams();
+    if (statusFilter.value.trim()) qs.set("status", statusFilter.value.trim());
+    if (pathFilter.value.trim()) qs.set("path", pathFilter.value.trim());
+    const resp = await api("/api/logs" + (qs.toString() ? "?" + qs.toString() : ""));
+    const items = resp.items || [];
+    for (const e of items) {
+      tbody.appendChild(
+        el("tr", {}, [
+          el("td", { class: "muted", text: e.time }),
+          el("td", { text: e.method }),
+          el("td", { class: "id-cell", text: e.path }),
+          el("td", {}, el("span", { class: "badge " + statusBadgeClass(e.status), text: String(e.status) })),
+          el("td", { class: "id-cell", text: e.user_id || "" }),
+          el("td", { class: "muted", text: e.duration_ms + "ms" }),
+        ])
+      );
+    }
+    tableCard.classList.toggle("hidden", items.length === 0);
+    emptyCard.classList.toggle("hidden", items.length !== 0);
+  }
+
+  const filterBtn = actionButton("Filter", { class: "btn-secondary" }, load);
+
+  container.appendChild(
+    el("div", { class: "card" }, [el("div", { class: "row" }, [statusFilter, pathFilter, filterBtn])])
+  );
+  container.appendChild(tableCard);
+  container.appendChild(emptyCard);
+
+  await load();
+}
+
+// -- backups -----------------------------------------------------------
+
+async function downloadAuthed(path, filename) {
+  const res = await fetch(path, { headers: { Authorization: "Bearer " + getToken() } });
+  if (!res.ok) {
+    toastError("Download failed");
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function renderBackups(container) {
+  container.appendChild(el("h2", {}, ["🗃️ Backups"]));
+
+  const exportBtn = actionButton("Download full backup (.zip)", {}, async () => {
+    await downloadAuthed("/api/backups/export", "onebox-backup-" + new Date().toISOString().slice(0, 10) + ".zip");
+    toastSuccess("Backup downloaded");
+  });
+
+  const restoreInput = el("input", { type: "file", accept: ".zip" });
+  const restoreStatus = el("div", { class: "error-text" });
+  const restoreBtn = actionButton("Restore from backup", { class: "btn-danger", loadingLabel: "Restoring..." }, async () => {
+    clear(restoreStatus);
+    if (!restoreInput.files[0]) return;
+    const ok = await confirmDialog("Restore will overwrite existing data in every collection present in the backup. This cannot be undone. Continue?", "Restore");
+    if (!ok) return;
+    const form = new FormData();
+    form.append("file", restoreInput.files[0]);
+    try {
+      const resp = await api("/api/backups/import", { method: "POST", body: form });
+      toastSuccess(`Restored ${resp.tables_restored ? resp.tables_restored.length : 0} table(s), ${resp.files_restored || 0} file(s)`);
+      restoreInput.value = "";
+    } catch (e) {
+      restoreStatus.textContent = e.message;
+      throw e;
+    }
+  });
+
+  container.appendChild(
+    el("div", { class: "card" }, [
+      el("h3", { text: "Full backup" }),
+      el("p", { class: "muted", text: "A single .zip with the database and every stored file. Restoring merges the backup's data into this instance's matching tables — collections only present in the backup are skipped and reported." }),
+      el("div", { class: "row" }, [exportBtn]),
+      el("div", { class: "row", style: "margin-top:12px" }, [restoreInput, restoreBtn]),
+      restoreStatus,
+    ])
+  );
+
+  const collectionsCard = el("div", { class: "col" }, [el("p", { class: "muted", text: "Loading collections…" })]);
+  container.appendChild(el("div", { class: "card" }, [el("h3", { text: "Per-collection export / import" }), collectionsCard]));
+
+  const resp = await api("/api/collections");
+  clear(collectionsCard);
+  const items = resp.items || [];
+  if (items.length === 0) {
+    collectionsCard.appendChild(emptyState("🗂️", "No collections yet", "Create one on the Collections page first."));
+    return;
+  }
+  for (const c of items) {
+    collectionsCard.appendChild(renderCollectionBackupRow(c));
+  }
+}
+
+function renderCollectionBackupRow(c) {
+  const status = el("div", { class: "error-text" });
+  const mappingArea = el("div", { class: "hidden" });
+  const fileInput = el("input", { type: "file", accept: ".json,.csv" });
+
+  const exportJSONBtn = actionButton("Export JSON", { class: "btn-secondary" }, () =>
+    downloadAuthed("/api/collections/" + encodeURIComponent(c.name) + "/export?format=json", c.name + ".json")
+  );
+  const exportCSVBtn = actionButton("Export CSV", { class: "btn-secondary" }, () =>
+    downloadAuthed("/api/collections/" + encodeURIComponent(c.name) + "/export?format=csv", c.name + ".csv")
+  );
+
+  const previewBtn = actionButton("Preview import…", { class: "btn-secondary" }, async () => {
+    clear(status);
+    clear(mappingArea);
+    mappingArea.classList.add("hidden");
+    if (!fileInput.files[0]) {
+      status.textContent = "Choose a .json or .csv file first.";
+      return;
+    }
+    const form = new FormData();
+    form.append("file", fileInput.files[0]);
+    try {
+      const preview = await api("/api/collections/" + encodeURIComponent(c.name) + "/import/preview", { method: "POST", body: form });
+      mappingArea.classList.remove("hidden");
+      const selects = {};
+      const rows = preview.columns.map((col) => {
+        const select = el(
+          "select",
+          {},
+          [el("option", { value: "", text: "(skip)" })].concat(preview.schema_fields.map((f) => el("option", { value: f, text: f })))
+        );
+        select.value = preview.suggested_map[col] || "";
+        selects[col] = select;
+        return el("div", { class: "row", style: "justify-content:space-between;max-width:420px" }, [el("span", { text: col }), select]);
+      });
+
+      const confirmBtn = actionButton("Confirm import", {}, async () => {
+        clear(status);
+        const mapping = {};
+        for (const col of preview.columns) mapping[col] = selects[col].value;
+        const importForm = new FormData();
+        importForm.append("file", fileInput.files[0]);
+        importForm.append("mapping", JSON.stringify(mapping));
+        try {
+          const result = await api("/api/collections/" + encodeURIComponent(c.name) + "/import", { method: "POST", body: importForm });
+          toastSuccess(`Imported ${result.imported} record(s)` + (result.failed ? `, ${result.failed} failed` : ""));
+          mappingArea.classList.add("hidden");
+          fileInput.value = "";
+        } catch (e) {
+          status.textContent = e.message;
+          throw e;
+        }
+      });
+
+      mappingArea.appendChild(
+        el("div", { class: "col", style: "margin-top:8px" }, [
+          el("div", { class: "muted", text: preview.total_rows + " row(s) detected. Map each source column to a field (or skip it):" }),
+          ...rows,
+          confirmBtn,
+        ])
+      );
+    } catch (e) {
+      status.textContent = e.message;
+      throw e;
+    }
+  });
+
+  return el("div", { class: "col", style: "padding:12px 0;border-bottom:1px solid var(--border)" }, [
+    el("div", { class: "row", style: "justify-content:space-between;align-items:center" }, [
+      el("strong", {}, c.name),
+      el("div", { class: "row" }, [exportJSONBtn, exportCSVBtn]),
+    ]),
+    el("div", { class: "row" }, [fileInput, previewBtn]),
+    status,
+    mappingArea,
   ]);
 }
 
@@ -1900,7 +2309,7 @@ async function renderSettings(container) {
   const ollamaBaseURL = textField("ollama_base_url", "Base URL", "http://localhost:11434");
   const ollamaTest = testButton("ollama", () => ({ base_url: ollamaBaseURL.input.value }));
 
-  const embeddingProvider = selectField("embedding_provider", "Provider", ["openai", "ollama"]);
+  const embeddingProvider = selectField("embedding_provider", "Provider", ["openai", "ollama", "voyage"]);
   const embeddingKey = secretField("embedding_api_key", "API key (if OpenAI-compatible)");
   const embeddingBaseURL = textField("embedding_base_url", "Base URL (if OpenAI-compatible)");
   const embeddingModel = textField("embedding_model", "Model", "text-embedding-3-small");
@@ -1970,7 +2379,8 @@ async function renderSettings(container) {
   container.appendChild(
     el("div", { class: "card provider-card" }, [
       el("h3", {}, ["📚 Embedding provider"]),
-      el("p", { class: "muted", text: "Used to ingest RAG sources and embed queries. Pick Ollama for a fully local setup, or OpenAI-compatible for a hosted embedding API." }),
+      el("p", { class: "muted", text: "Used to ingest RAG sources and embed queries. Pick Ollama for a fully local setup, OpenAI-compatible, or Voyage AI for a hosted embedding API." }),
+      el("p", { class: "muted", style: "font-size:0.82rem", text: "Anthropic doesn't provide embedding models (Claude is chat-only) — it can't be used here." }),
       el("div", { class: "col" }, [
         el("label", {}, [embeddingProvider.label, embeddingProvider.input]),
         el("label", {}, [embeddingKey.label, embeddingKey.input]),
@@ -1990,6 +2400,7 @@ async function renderSettings(container) {
   );
 
   container.appendChild(renderAdminManagementPanel());
+  container.appendChild(renderChatSharePanel());
   container.appendChild(renderPasswordResetPanel());
 
   container.appendChild(

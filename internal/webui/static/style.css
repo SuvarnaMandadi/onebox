@@ -206,8 +206,12 @@ p { margin: 0 0 var(--space-3); }
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   transition: background-color 0.12s ease, color 0.12s ease;
 }
+.nav-icon { font-size: 0.95em; line-height: 1; }
 #sidebar nav a:hover { background: var(--surface-2); color: var(--text-primary); }
 #sidebar nav a.active { background: var(--accent); color: var(--accent-contrast); }
 #sidebar nav a.locked {
@@ -307,6 +311,7 @@ button:disabled, .btn:disabled { opacity: 0.55; cursor: not-allowed; }
   color: var(--text-primary);
   border-color: var(--border-strong);
 }
+.btn-secondary.active { background: var(--accent); color: var(--accent-contrast); border-color: transparent; }
 .btn-ghost {
   background: transparent;
   color: var(--text-secondary);
@@ -354,8 +359,8 @@ input[type="checkbox"] { width: auto; padding: 0; }
 .error-text { color: var(--danger); font-size: 0.9rem; }
 .success-text { color: var(--success-text); font-size: 0.9rem; }
 .provider-card h3 { display: flex; align-items: center; gap: var(--space-2); }
-.back-link { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
-.back-link:hover { color: var(--text-primary); }
+.back-link { color: var(--accent); text-decoration: none; font-size: 0.92rem; font-weight: 700; display: inline-block; margin-bottom: var(--space-3); }
+.back-link:hover { color: var(--accent-strong); text-decoration: underline; }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td { text-align: left; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); vertical-align: middle; }
@@ -478,6 +483,17 @@ td.id-cell, td.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace;
 .chart-bar:hover { filter: brightness(1.15); }
 
 code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.85em; }
+.api-snippet {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 0.82rem;
+  overflow-x: auto;
+  white-space: pre;
+  margin: var(--space-1) 0 var(--space-3);
+}
 
 /* -- home page -- */
 
@@ -737,3 +753,61 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
   }
   .stat-card:hover, .stat-card:focus-visible { transform: none; }
 }
+
+/* -- chatbot panel -- */
+
+.chatbot-fab {
+  position: fixed;
+  bottom: var(--space-6);
+  right: var(--space-6);
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--accent-gradient);
+  color: #fff;
+  border: none;
+  font-size: 1.4rem;
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chatbot-panel {
+  position: fixed;
+  bottom: calc(var(--space-6) + 64px);
+  right: var(--space-6);
+  width: 340px;
+  max-width: calc(100vw - 2 * var(--space-4));
+  max-height: 480px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  z-index: 500;
+  overflow: hidden;
+}
+.chatbot-panel-header {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.chatbot-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: 0.88rem;
+}
+.chatbot-msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-contrast); border-radius: var(--radius-md); padding: 0.4rem 0.7rem; max-width: 85%; }
+.chatbot-msg.assistant { align-self: flex-start; background: var(--surface-2); border-radius: var(--radius-md); padding: 0.4rem 0.7rem; max-width: 85%; white-space: pre-wrap; }
+.chatbot-form { display: flex; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--border); }
+.chatbot-form input { flex: 1; }

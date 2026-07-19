@@ -14,6 +14,7 @@ type admin struct {
 	PasswordHash       string `json:"-"`
 	FirstName          string `json:"first_name"`
 	LastName           string `json:"last_name"`
+	DisplayName        string `json:"display_name"`
 	Phone              string `json:"phone"`
 	AvatarFileID       string `json:"avatar_file_id,omitempty"`
 	RecoveryPhraseHash string `json:"-"`
@@ -21,7 +22,7 @@ type admin struct {
 	Updated            string `json:"updated"`
 }
 
-const adminColumns = "id, email, password_hash, first_name, last_name, phone, avatar_file_id, recovery_phrase_hash, created, updated"
+const adminColumns = "id, email, password_hash, first_name, last_name, display_name, phone, avatar_file_id, recovery_phrase_hash, created, updated"
 
 func countAdmins(ctx context.Context, sqlDB *sql.DB) (int, error) {
 	var count int
@@ -68,7 +69,7 @@ func getAdminByID(ctx context.Context, sqlDB *sql.DB, id string) (*admin, error)
 func scanAdmin(row *sql.Row) (*admin, error) {
 	var a admin
 	var avatarFileID, recoveryPhraseHash sql.NullString
-	if err := row.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.FirstName, &a.LastName, &a.Phone, &avatarFileID, &recoveryPhraseHash, &a.Created, &a.Updated); err != nil {
+	if err := row.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.FirstName, &a.LastName, &a.DisplayName, &a.Phone, &avatarFileID, &recoveryPhraseHash, &a.Created, &a.Updated); err != nil {
 		return nil, err
 	}
 	a.AvatarFileID = avatarFileID.String
@@ -89,7 +90,7 @@ func listAdmins(ctx context.Context, sqlDB *sql.DB) ([]*admin, error) {
 	for rows.Next() {
 		var a admin
 		var avatarFileID, recoveryPhraseHash sql.NullString
-		if err := rows.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.FirstName, &a.LastName, &a.Phone, &avatarFileID, &recoveryPhraseHash, &a.Created, &a.Updated); err != nil {
+		if err := rows.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.FirstName, &a.LastName, &a.DisplayName, &a.Phone, &avatarFileID, &recoveryPhraseHash, &a.Created, &a.Updated); err != nil {
 			return nil, fmt.Errorf("scan admin row: %w", err)
 		}
 		a.AvatarFileID = avatarFileID.String
@@ -147,10 +148,10 @@ func updateAdminAvatar(ctx context.Context, sqlDB *sql.DB, id, avatarFileID stri
 	return getAdminByID(ctx, sqlDB, id)
 }
 
-func updateAdminProfile(ctx context.Context, sqlDB *sql.DB, id, firstName, lastName, phone string) (*admin, error) {
+func updateAdminProfile(ctx context.Context, sqlDB *sql.DB, id, firstName, lastName, displayName, phone string) (*admin, error) {
 	_, err := sqlDB.ExecContext(ctx,
-		`UPDATE _admins SET first_name = ?, last_name = ?, phone = ?, updated = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-		firstName, lastName, phone, id,
+		`UPDATE _admins SET first_name = ?, last_name = ?, display_name = ?, phone = ?, updated = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+		firstName, lastName, displayName, phone, id,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update admin profile: %w", err)

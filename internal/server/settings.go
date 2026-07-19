@@ -23,6 +23,11 @@ const (
 	settingEmbeddingModel    settingKey = "embedding_model"
 
 	settingOllamaBaseURL settingKey = "ollama_base_url"
+
+	// settingChatShareToken is deliberately not in allSettingKeys — it's
+	// managed only through the dedicated /api/chat-share endpoints, not
+	// the generic settings PUT, so it can't be set to an arbitrary value.
+	settingChatShareToken settingKey = "chat_share_token"
 )
 
 // secretSettingKeys never round-trip back to the client in plaintext once

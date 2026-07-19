@@ -32,10 +32,11 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateProfileRequest struct {
-	Email     string `json:"email"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	Phone     string `json:"phone"`
+	Email       string `json:"email"`
+	FirstName   string `json:"first_name"`
+	LastName    string `json:"last_name"`
+	DisplayName string `json:"display_name"`
+	Phone       string `json:"phone"`
 }
 
 // handleUpdateMe updates the caller's own editable profile fields. A
@@ -60,7 +61,7 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := updateUserProfile(r.Context(), s.db, uid, email, strings.TrimSpace(req.FirstName), strings.TrimSpace(req.LastName), strings.TrimSpace(req.Phone))
+	u, err := updateUserProfile(r.Context(), s.db, uid, email, strings.TrimSpace(req.FirstName), strings.TrimSpace(req.LastName), strings.TrimSpace(req.DisplayName), strings.TrimSpace(req.Phone))
 	if err != nil {
 		if err == errEmailTaken {
 			writeError(w, http.StatusConflict, "email_taken", "an account with that email already exists", nil)
@@ -113,16 +114,49 @@ func (s *Server) handleUploadAvatar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to store avatar", nil)
 		return
 	}
-	if _, err := createFileRecord(r.Context(), s.db, fileID, uid, header.Filename, mime, int64(len(content))); err != nil {
+	if _, err := createAvatarFileRecord(r.Context(), s.db, fileID, uid, header.Filename, mime, int64(len(content))); err != nil {
 		removeStoredFile(s.cfg.FilesDir, fileID)
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to record avatar file", nil)
 		return
 	}
 
+	previous, _ := getUserByID(r.Context(), s.db, uid)
+
 	u, err := updateUserAvatar(r.Context(), s.db, uid, fileID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to update avatar", nil)
 		return
+	}
+	if previous != nil && previous.AvatarFileID != "" {
+		deleteFileRecord(r.Context(), s.db, previous.AvatarFileID)
+		removeStoredFile(s.cfg.FilesDir, previous.AvatarFileID)
+	}
+	writeJSON(w, http.StatusOK, u)
+}
+
+// handleRemoveAvatar clears the caller's avatar_file_id (reverting the
+// dashboard to showing initials) and deletes the stored photo — the only
+// way to remove a profile picture, since avatars are hidden from the
+// Files UI and can't be deleted from there.
+func (s *Server) handleRemoveAvatar(w http.ResponseWriter, r *http.Request) {
+	uid, ok := authUserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_token", "session token is invalid or expired", nil)
+		return
+	}
+	previous, err := getUserByID(r.Context(), s.db, uid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to load account", nil)
+		return
+	}
+	u, err := updateUserAvatar(r.Context(), s.db, uid, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to remove avatar", nil)
+		return
+	}
+	if previous.AvatarFileID != "" {
+		deleteFileRecord(r.Context(), s.db, previous.AvatarFileID)
+		removeStoredFile(s.cfg.FilesDir, previous.AvatarFileID)
 	}
 	writeJSON(w, http.StatusOK, u)
 }

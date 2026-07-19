@@ -162,9 +162,10 @@ func (s *Server) handleAdminMe(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateAdminProfileRequest struct {
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	Phone     string `json:"phone"`
+	FirstName   string `json:"first_name"`
+	LastName    string `json:"last_name"`
+	DisplayName string `json:"display_name"`
+	Phone       string `json:"phone"`
 }
 
 func (s *Server) handleUpdateAdminMe(w http.ResponseWriter, r *http.Request) {
@@ -178,7 +179,7 @@ func (s *Server) handleUpdateAdminMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON", nil)
 		return
 	}
-	a, err := updateAdminProfile(r.Context(), s.db, aid, strings.TrimSpace(req.FirstName), strings.TrimSpace(req.LastName), strings.TrimSpace(req.Phone))
+	a, err := updateAdminProfile(r.Context(), s.db, aid, strings.TrimSpace(req.FirstName), strings.TrimSpace(req.LastName), strings.TrimSpace(req.DisplayName), strings.TrimSpace(req.Phone))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to update profile", nil)
 		return
@@ -223,16 +224,46 @@ func (s *Server) handleUploadAdminAvatar(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to store avatar", nil)
 		return
 	}
-	if _, err := createFileRecord(r.Context(), s.db, fileID, aid, header.Filename, mime, int64(len(content))); err != nil {
+	if _, err := createAvatarFileRecord(r.Context(), s.db, fileID, aid, header.Filename, mime, int64(len(content))); err != nil {
 		removeStoredFile(s.cfg.FilesDir, fileID)
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to record avatar file", nil)
 		return
 	}
 
+	previous, _ := getAdminByID(r.Context(), s.db, aid)
+
 	a, err := updateAdminAvatar(r.Context(), s.db, aid, fileID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to update avatar", nil)
 		return
+	}
+	if previous != nil && previous.AvatarFileID != "" {
+		deleteFileRecord(r.Context(), s.db, previous.AvatarFileID)
+		removeStoredFile(s.cfg.FilesDir, previous.AvatarFileID)
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+// handleRemoveAdminAvatar mirrors handleRemoveAvatar for admin accounts.
+func (s *Server) handleRemoveAdminAvatar(w http.ResponseWriter, r *http.Request) {
+	aid, ok := authAdminID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_token", "session token is invalid or expired", nil)
+		return
+	}
+	previous, err := getAdminByID(r.Context(), s.db, aid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to load account", nil)
+		return
+	}
+	a, err := updateAdminAvatar(r.Context(), s.db, aid, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to remove avatar", nil)
+		return
+	}
+	if previous.AvatarFileID != "" {
+		deleteFileRecord(r.Context(), s.db, previous.AvatarFileID)
+		removeStoredFile(s.cfg.FilesDir, previous.AvatarFileID)
 	}
 	writeJSON(w, http.StatusOK, a)
 }

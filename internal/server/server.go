@@ -102,6 +102,18 @@ func buildEmbeddingProvider(cfg config.Config) embeddings.Provider {
 	switch cfg.EmbeddingProvider {
 	case "ollama":
 		return embeddings.NewOllamaProvider(cfg.OllamaBaseURL, cfg.EmbeddingModel)
+	case "voyage":
+		// Voyage AI's embeddings endpoint matches OpenAI's request/response
+		// shape (model, input[] -> data[].embedding/.index), so it's the
+		// same client with a different default base URL.
+		if cfg.EmbeddingAPIKey == "" {
+			return nil
+		}
+		baseURL := cfg.EmbeddingBaseURL
+		if baseURL == "" {
+			baseURL = "https://api.voyageai.com/v1"
+		}
+		return embeddings.NewOpenAIProvider(baseURL, cfg.EmbeddingAPIKey, cfg.EmbeddingModel)
 	default:
 		if cfg.EmbeddingAPIKey == "" {
 			return nil
@@ -139,10 +151,23 @@ func (s *Server) Router() http.Handler {
 	}))
 
 	r.Mount("/_/", http.StripPrefix("/_/", webui.Handler()))
+	r.Get("/chat/{token}", handlePublicChatPage)
 
 	r.Route("/api", func(r chi.Router) {
+		r.Use(s.requestLogger)
 		r.Get("/health", s.handleHealth)
 		r.Get("/setup-status", s.handleSetupStatus)
+		r.With(s.requireAdminAuth).Get("/logs", s.handleListLogs)
+		r.With(s.requireAdminAuth).Post("/chat", s.handleChatbot)
+		r.Post("/chat/{token}", s.handlePublicChat)
+
+		r.Route("/chat-share", func(r chi.Router) {
+			r.Use(s.requireAdminAuth)
+			r.Get("/", s.handleGetChatShare)
+			r.Post("/enable", s.handleEnableChatShare)
+			r.Post("/disable", s.handleDisableChatShare)
+			r.Post("/regenerate", s.handleRegenerateChatShare)
+		})
 
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", s.handleSignup)
@@ -155,6 +180,7 @@ func (s *Server) Router() http.Handler {
 				r.Get("/me", s.handleMe)
 				r.Patch("/me", s.handleUpdateMe)
 				r.Post("/me/avatar", s.handleUploadAvatar)
+				r.Delete("/me/avatar", s.handleRemoveAvatar)
 				r.Post("/change-password", s.handleChangePassword)
 			})
 
@@ -174,6 +200,7 @@ func (s *Server) Router() http.Handler {
 				r.Get("/me", s.handleAdminMe)
 				r.Patch("/me", s.handleUpdateAdminMe)
 				r.Post("/me/avatar", s.handleUploadAdminAvatar)
+				r.Delete("/me/avatar", s.handleRemoveAdminAvatar)
 			})
 		})
 
@@ -200,6 +227,12 @@ func (s *Server) Router() http.Handler {
 		r.With(s.requireAnyAuth).Post("/llm/chat", s.handleLLMChat)
 		r.With(s.requireAnyAuth).Get("/usage", s.handleUsage)
 
+		r.Route("/backups", func(r chi.Router) {
+			r.Use(s.requireAdminAuth)
+			r.Get("/export", s.handleExportBackup)
+			r.Post("/import", s.handleImportBackup)
+		})
+
 		r.Route("/settings", func(r chi.Router) {
 			r.Use(s.requireAdminAuth)
 			r.Get("/", s.handleGetSettings)
@@ -214,6 +247,9 @@ func (s *Server) Router() http.Handler {
 				r.Get("/", s.handleListCollections)
 				r.Get("/{name}", s.handleGetCollection)
 				r.Delete("/{name}", s.handleDeleteCollection)
+				r.Get("/{name}/export", s.handleExportCollection)
+				r.Post("/{name}/import/preview", s.handleImportPreview)
+				r.Post("/{name}/import", s.handleImportCollection)
 			})
 
 			r.Route("/{name}/records", func(r chi.Router) {

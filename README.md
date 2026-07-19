@@ -70,7 +70,7 @@ redesign (home page, account/profile, dedicated login/signup pages),
 | [`cmd/onebox`](cmd/onebox) | The binary's entrypoint |
 | [`internal/`](internal) | Server, auth, RAG, LLM gateway, config, embedded admin dashboard |
 | [`sdk/js`](sdk/js) | Dependency-free JS/TS client SDK |
-| [`docs/`](docs) | Quickstart, a full tutorial, and the API reference |
+| [`docs/`](docs) | Quickstart, a full tutorial, the API reference, and [using onebox from any frontend](docs/compatibility.md) |
 | [`examples/`](examples) | Four runnable demo apps built on the API |
 
 ## Example apps

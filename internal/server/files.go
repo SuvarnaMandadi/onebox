@@ -43,9 +43,20 @@ func removeStoredFile(filesDir, id string) {
 }
 
 func createFileRecord(ctx context.Context, sqlDB *sql.DB, id, ownerID, filename, mime string, size int64) (*fileRecord, error) {
+	return createFileRecordKind(ctx, sqlDB, id, ownerID, filename, mime, size, "file")
+}
+
+// createAvatarFileRecord stores an avatar upload with kind="avatar" so it
+// never appears in the Files (File Storage) listing/UI — see listFiles
+// and countFiles, both of which filter to kind="file" only.
+func createAvatarFileRecord(ctx context.Context, sqlDB *sql.DB, id, ownerID, filename, mime string, size int64) (*fileRecord, error) {
+	return createFileRecordKind(ctx, sqlDB, id, ownerID, filename, mime, size, "avatar")
+}
+
+func createFileRecordKind(ctx context.Context, sqlDB *sql.DB, id, ownerID, filename, mime string, size int64, kind string) (*fileRecord, error) {
 	_, err := sqlDB.ExecContext(ctx,
-		`INSERT INTO _files (id, owner_id, filename, path, size, mime) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, nullableString(ownerID), filename, id, size, mime,
+		`INSERT INTO _files (id, owner_id, filename, path, size, mime, kind) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, nullableString(ownerID), filename, id, size, mime, kind,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert file record: %w", err)
@@ -71,7 +82,7 @@ func getFileByID(ctx context.Context, sqlDB *sql.DB, id string) (*fileRecord, er
 // only files they own.
 func listFiles(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cursorID, ownerID string, isAdmin bool) ([]*fileRecord, error) {
 	stmt := `SELECT id, owner_id, filename, size, mime, created FROM _files`
-	var conds []string
+	conds := []string{`kind = 'file'`}
 	args := []any{}
 	if !isAdmin {
 		conds = append(conds, `owner_id = ?`)
@@ -111,10 +122,10 @@ func listFiles(ctx context.Context, sqlDB *sql.DB, limit int, cursorCreated, cur
 // dashboard's Home page stat card, which needs a total rather than one
 // page of results.
 func countFiles(ctx context.Context, sqlDB *sql.DB, ownerID string, isAdmin bool) (int, error) {
-	stmt := `SELECT COUNT(*) FROM _files`
+	stmt := `SELECT COUNT(*) FROM _files WHERE kind = 'file'`
 	args := []any{}
 	if !isAdmin {
-		stmt += ` WHERE owner_id = ?`
+		stmt += ` AND owner_id = ?`
 		args = append(args, ownerID)
 	}
 	var n int

@@ -13,12 +13,14 @@
         <span class="brand-mark">◆</span> onebox
       </a>
       <nav id="mainNav">
-        <a href="#/home" data-route="home">Home</a>
-        <a href="#/collections" data-route="collections" data-role="admin">Collections</a>
-        <a href="#/files" data-route="files">Files</a>
-        <a href="#/rag" data-route="rag">RAG sources</a>
-        <a href="#/usage" data-route="usage">Usage</a>
-        <a href="#/settings" data-route="settings" data-role="admin">Settings</a>
+        <a href="#/home" data-route="home"><span class="nav-icon">🏠</span> Home</a>
+        <a href="#/collections" data-route="collections" data-role="admin"><span class="nav-icon">🗄️</span> Collections</a>
+        <a href="#/files" data-route="files"><span class="nav-icon">📁</span> File Storage</a>
+        <a href="#/rag" data-route="rag"><span class="nav-icon">📚</span> RAG sources</a>
+        <a href="#/usage" data-route="usage"><span class="nav-icon">📊</span> Usage</a>
+        <a href="#/logs" data-route="logs" data-role="admin"><span class="nav-icon">📜</span> Logs</a>
+        <a href="#/backups" data-route="backups" data-role="admin"><span class="nav-icon">🗃️</span> Backups</a>
+        <a href="#/settings" data-route="settings" data-role="admin"><span class="nav-icon">⚙️</span> Settings</a>
       </nav>
       <div class="sidebar-footer">
         <a href="#/account" id="accountSummary" class="account-summary" data-route="account">
@@ -41,6 +43,7 @@
 
   <div id="toasts" aria-live="polite"></div>
   <div id="modalRoot"></div>
+  <div id="chatbotRoot" class="hidden"></div>
 
   <script src="app.js"></script>
 </body>
