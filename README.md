@@ -109,4 +109,6 @@ anti-scope list and rationale.
 
 ## License
 
-[MIT](LICENSE).
+Copyright (c) 2026 Suvarna Mandadi. Licensed under the [MIT License](LICENSE) —
+free to use, modify, and redistribute, provided the copyright notice above
+and the license text are kept with any copy.
