@@ -62,6 +62,11 @@ type Config struct {
 	// Supabase's anon key) — lock it down with ONEBOX_CORS_ORIGINS for a
 	// production deployment.
 	CORSOrigins []string
+
+	// Version is the build version string (set via -ldflags by
+	// scripts/build-release.sh), surfaced by GET /api/health for the
+	// dashboard footer. Defaults to "dev" for local builds.
+	Version string
 }
 
 // Load builds a Config from environment variables, falling back to

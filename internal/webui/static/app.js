@@ -288,6 +288,17 @@ const shell = document.getElementById("shell");
 const loginRoot = document.getElementById("loginRoot");
 const app = document.getElementById("app");
 
+// Populate the sidebar's version footer once at load — lets a self-hoster
+// (or anyone debugging a "why does this look old" report) confirm which
+// build is actually running without checking the binary from a shell.
+fetch("/api/health")
+  .then((r) => r.json())
+  .then((body) => {
+    const el = document.getElementById("versionFooter");
+    if (el && body && body.version) el.textContent = "v" + body.version;
+  })
+  .catch(() => {});
+
 document.getElementById("logoutBtn").addEventListener("click", () => {
   clearToken();
   clearRole();

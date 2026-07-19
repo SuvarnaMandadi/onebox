@@ -32,6 +32,7 @@ func main() {
 
 func run() error {
 	cfg := config.Load()
+	cfg.Version = version
 	log.Printf("onebox %s starting", version)
 
 	sqlDB, err := db.Open(cfg.DBPath)
