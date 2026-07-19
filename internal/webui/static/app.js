@@ -21,13 +21,7 @@ let accountCache = null;
 
 async function loadAccount(force = false) {
   if (accountCache && !force) return accountCache;
-  if (isAdminRole()) {
-    // _admins has no profile fields (name/avatar) — only email is
-    // available, decoded from the JWT-issued record we cached at login.
-    accountCache = JSON.parse(sessionStorage.getItem("onebox_admin_record") || "null");
-  } else {
-    accountCache = await api("/api/auth/me");
-  }
+  accountCache = await api(isAdminRole() ? "/api/admins/me" : "/api/auth/me");
   return accountCache;
 }
 
@@ -47,6 +41,26 @@ function displayName(account) {
   return "";
 }
 
+// avatarBlobCache maps a file id to an object URL — avatar images are
+// served from an authenticated endpoint (/api/files/:id), and a plain
+// <img src="..."> can't send an Authorization header, so every avatar is
+// fetched once via api()-style auth and reused as a blob: URL after that.
+const avatarBlobCache = new Map();
+
+async function resolveAvatarURL(fileId) {
+  if (avatarBlobCache.has(fileId)) return avatarBlobCache.get(fileId);
+  try {
+    const res = await fetch("/api/files/" + fileId, { headers: { Authorization: "Bearer " + getToken() } });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    avatarBlobCache.set(fileId, url);
+    return url;
+  } catch (e) {
+    return null;
+  }
+}
+
 function avatarNode(account, size = "avatar-sm") {
   const node = el("span", { class: "avatar " + size });
   fillAvatarNode(node, account);
@@ -56,12 +70,18 @@ function avatarNode(account, size = "avatar-sm") {
 // fillAvatarNode populates an existing avatar <span> in place (so callers
 // that already hold a reference to a fixed-id slot, like the sidebar's
 // #accountAvatar, don't have to juggle replacing/re-tagging DOM nodes).
+// Shows initials immediately, then swaps in the real photo once the
+// authenticated fetch resolves (see resolveAvatarURL).
 function fillAvatarNode(node, account) {
   clear(node);
+  node.textContent = initials(displayName(account) || (account && account.email));
   if (account && account.avatar_file_id) {
-    node.appendChild(el("img", { src: "/api/files/" + account.avatar_file_id, alt: "" }));
-  } else {
-    node.textContent = initials(displayName(account) || (account && account.email));
+    const fileId = account.avatar_file_id;
+    resolveAvatarURL(fileId).then((url) => {
+      if (!url) return;
+      clear(node);
+      node.appendChild(el("img", { src: url, alt: "" }));
+    });
   }
 }
 
@@ -80,8 +100,21 @@ async function refreshAccountSummary() {
   }
 }
 
-// api() wraps fetch: sends the admin bearer token, parses JSON, and
-// throws a readable Error using the server's {code,message} envelope.
+// Endpoints where a 401 means "your credentials were wrong" (login,
+// signup, and the two forgot-password flows), never "your session
+// expired" — there is no session yet at the point any of these are
+// called. api() must not treat their 401s as a dead session, or a wrong
+// password on the login form gets silently rewritten into a confusing
+// "session expired" message (a real bug hand-tested and reported).
+const CREDENTIAL_ENDPOINTS = [
+  "/api/auth/login", "/api/auth/signup",
+  "/api/admins/login", "/api/admins/signup",
+  "/api/auth/recover-password", "/api/auth/reset-password",
+];
+
+// api() wraps fetch: sends the bearer token, parses JSON, and throws a
+// readable Error (with a .code from the server's {code,message} envelope
+// so callers can branch on specific failures) using that envelope.
 async function api(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
   const token = getToken();
@@ -90,17 +123,23 @@ async function api(path, opts = {}) {
     headers["Content-Type"] = "application/json";
   }
   const res = await fetch(path, Object.assign({}, opts, { headers }));
-  if (res.status === 401) {
+
+  const isCredentialEndpoint = CREDENTIAL_ENDPOINTS.some((p) => path.startsWith(p));
+  if (res.status === 401 && !isCredentialEndpoint) {
     clearToken();
+    clearRole();
+    accountCache = null;
     location.hash = "#/login";
-    throw new Error("session expired, please log in again");
+    throw new Error("Your session has expired — please log in again.");
   }
   if (res.status === 204) return null;
   const isJSON = (res.headers.get("content-type") || "").includes("application/json");
   const body = isJSON ? await res.json() : await res.text();
   if (!res.ok) {
     const msg = isJSON && body && body.message ? body.message : String(body);
-    throw new Error(msg);
+    const err = new Error(msg);
+    if (isJSON && body && body.code) err.code = body.code;
+    throw err;
   }
   return body;
 }
@@ -252,7 +291,6 @@ const app = document.getElementById("app");
 document.getElementById("logoutBtn").addEventListener("click", () => {
   clearToken();
   clearRole();
-  sessionStorage.removeItem("onebox_admin_record");
   accountCache = null;
   // Setting location.hash (when it actually changes) fires the
   // "hashchange" listener below, which calls navigate() itself — an
@@ -274,14 +312,53 @@ function updateActiveNav(routeName) {
   });
 }
 
+// applyRoleVisibility gives non-admin users a *hint* that admin-only
+// sections exist (a grayed-out, lock-badged nav item) rather than hiding
+// them outright — hand-tested feedback was that fully hiding Collections
+// and Settings made it look like they didn't exist at all, rather than
+// "ask an admin to promote you."
 function applyRoleVisibility() {
   const admin = isAdminRole();
   document.querySelectorAll('[data-role="admin"]').forEach((node) => {
-    node.classList.toggle("hidden", !admin);
+    node.classList.toggle("locked", !admin);
   });
 }
 
+// Sidebar nav links are only ever rendered once (in index.html), so their
+// click handlers are bound once here rather than re-bound on every
+// navigate() call. Two behaviors layered on top of the plain hash link:
+//  - a "locked" (admin-only, non-admin viewer) item explains itself via a
+//    toast instead of silently 404ing against an admin-only endpoint.
+//  - clicking the link for the route you're already on doesn't change
+//    location.hash, so the "hashchange" listener never fires and the
+//    page would otherwise sit there stale (reported: Home's stat cards
+//    not refreshing) — force a re-render in that case.
+document.querySelectorAll('#sidebar a[href^="#/"]').forEach((a) => {
+  a.addEventListener("click", (e) => {
+    if (a.classList.contains("locked")) {
+      e.preventDefault();
+      toast('"' + a.textContent.trim() + '" is an admin feature — ask an existing admin to promote your account from Settings → Admins.', "info");
+      return;
+    }
+    const targetHash = a.getAttribute("href");
+    if (targetHash === (location.hash || "#/home")) {
+      e.preventDefault();
+      navigate();
+    }
+  });
+});
+
+// navGeneration guards against the login/signup race: both pages do an
+// async GET /api/setup-status before rendering, so two hash changes in
+// quick succession (e.g. logging out, then landing on #/signup) can have
+// two navigate() calls in flight together — whichever's fetch resolves
+// last would otherwise overwrite the correct, newer page with a stale
+// one. Each render checks it's still the current navigation before
+// touching the DOM; see renderLoginPage/renderSignupPage.
+let navGeneration = 0;
+
 async function navigate() {
+  const myGen = ++navGeneration;
   const authed = !!getToken();
   shell.classList.toggle("hidden", !authed);
   loginRoot.classList.toggle("hidden", authed);
@@ -289,9 +366,9 @@ async function navigate() {
   if (!authed) {
     clear(loginRoot);
     const parts = currentRoute();
-    if (parts[0] === "signup") renderSignupPage(loginRoot);
+    if (parts[0] === "signup") await renderSignupPage(loginRoot, myGen);
     else if (parts[0] === "forgot-password") renderForgotPasswordPage(loginRoot);
-    else renderLoginPage(loginRoot);
+    else await renderLoginPage(loginRoot, myGen);
     return;
   }
 
@@ -404,7 +481,92 @@ function mountAuthPage(container, card) {
   container.appendChild(el("div", { class: "auth-shell page-transition" }, [card]));
 }
 
-function renderLoginPage(container, roleMode = "user") {
+// emergencyKitCard is the "1Password-style" reveal-once recovery phrase
+// component, shared by the post-signup flow and the Account page's
+// "regenerate recovery phrase" flow. It's plain markup (no PDF library —
+// see the docs/api-reference.md note): "Download Emergency Kit" prints
+// via the browser's native print-to-PDF, using the @media print rules in
+// style.css to show only the phrase card.
+function emergencyKitCard(opts) {
+  const words = opts.phrase.trim().split(/\s+/);
+  const grid = el(
+    "div",
+    { class: "recovery-grid" },
+    words.map((w, i) => el("div", { class: "recovery-word" }, [el("span", { class: "recovery-word-index", text: String(i + 1) }), w]))
+  );
+
+  const printBtn = el("button", {
+    type: "button",
+    class: "btn-secondary",
+    text: "🖨️ Download Emergency Kit (PDF)",
+    onclick: () => window.print(),
+  });
+
+  const ack = el("input", { type: "checkbox" });
+  const continueBtn = actionButton(opts.continueLabel || "Continue", {}, async () => {
+    if (opts.onContinue) await opts.onContinue();
+  });
+  continueBtn.disabled = true;
+  ack.addEventListener("change", () => {
+    continueBtn.disabled = !ack.checked;
+  });
+
+  return el("div", { class: "auth-card emergency-kit-card" }, [
+    ...authBrandBlock(),
+    el("h2", { class: "auth-title", text: "Save your recovery phrase" }),
+    el("p", { class: "muted", style: "font-size:0.86rem" }, [
+      "This is the only time this phrase will be shown. Anyone who has it can reset ",
+      opts.email,
+      "'s password — save it somewhere safe, like a password manager, or print it and lock it away.",
+    ]),
+    el("div", { class: "recovery-kit-print" }, [
+      el("div", { class: "recovery-kit-meta" }, [
+        el("div", {}, [el("strong", {}, "Account: "), opts.email]),
+        el("div", {}, [el("strong", {}, "Server: "), location.origin]),
+        el("div", { class: "muted" }, "Generated " + new Date().toLocaleString()),
+      ]),
+      grid,
+      el("p", { class: "muted", style: "font-size:0.8rem" }, [
+        "To reset this password later, go to ",
+        location.origin + "/_/#/forgot-password",
+        " and enter this phrase along with the account email.",
+      ]),
+    ]),
+    el("div", { class: "row no-print" }, [printBtn]),
+    el("label", { class: "row no-print", style: "align-items:center;font-weight:400" }, [ack, "I've saved this phrase somewhere safe"]),
+    el("div", { class: "no-print" }, [continueBtn]),
+  ]);
+}
+
+// showEmergencyKitModal is emergencyKitCard's modal presentation, used
+// when regenerating a phrase from inside the already-authenticated
+// dashboard (Account page) rather than during signup. Unlike
+// confirmDialog, there's deliberately no click-outside-to-close — losing
+// track of an unsaved phrase is the one outcome this screen exists to
+// prevent.
+function showEmergencyKitModal(opts) {
+  return new Promise((resolve) => {
+    clear(modalRoot);
+    const overlay = el("div", { class: "modal-overlay" }, [emergencyKitCard({ ...opts, onContinue: () => { clear(modalRoot); resolve(); } })]);
+    modalRoot.appendChild(overlay);
+  });
+}
+
+async function fetchSetupStatus() {
+  try {
+    return await api("/api/setup-status");
+  } catch (e) {
+    return { admin_exists: true }; // safest default: don't offer to bootstrap an admin if the check fails
+  }
+}
+
+async function renderLoginPage(container, roleMode = "user", gen) {
+  const status = await fetchSetupStatus();
+  if (gen !== undefined && gen !== navGeneration) return; // superseded by a newer navigation
+  renderLoginForm(container, roleMode, status.admin_exists);
+}
+
+function renderLoginForm(container, roleMode, adminExists) {
   const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "username" });
   const { input: passwordInput, wrap: passwordWrap } = passwordField("Password", "current-password");
   const status = el("div", { class: "field-error" });
@@ -426,25 +588,32 @@ function renderLoginPage(container, roleMode = "user") {
         });
         setToken(resp.token);
         setRole(roleMode);
-        if (roleMode === "admin") sessionStorage.setItem("onebox_admin_record", JSON.stringify(resp.record));
         accountCache = null;
         toastSuccess("Logged in");
         location.hash = "#/home"; // triggers navigate() via the hashchange listener
       } catch (e) {
-        status.textContent = e.message;
+        renderAuthError(status, e, { onSignupLink: () => renderSignupPage(container) });
       }
     }
   );
 
-  const roleSwitch = el("button", {
-    type: "button",
-    class: "link-btn",
-    text: roleMode === "admin" ? "Log in as a user instead" : "Are you the admin? Log in as admin",
-  });
-  roleSwitch.addEventListener("click", () => {
-    clear(container);
-    renderLoginPage(container, roleMode === "admin" ? "user" : "admin");
-  });
+  const roleSwitchRow =
+    adminExists || roleMode === "admin"
+      ? el("div", { class: "auth-role-switch" }, [
+          (() => {
+            const btn = el("button", {
+              type: "button",
+              class: "link-btn",
+              text: roleMode === "admin" ? "Log in as a user instead" : "Are you the admin? Log in as admin",
+            });
+            btn.addEventListener("click", () => {
+              clear(container);
+              renderLoginForm(container, roleMode === "admin" ? "user" : "admin", adminExists);
+            });
+            return btn;
+          })(),
+        ])
+      : null;
 
   const card = el("div", { class: "auth-card" }, [
     ...authBrandBlock(),
@@ -456,14 +625,55 @@ function renderLoginPage(container, roleMode = "user") {
       submitBtn,
       status,
     ]),
-    el("div", { class: "auth-role-switch" }, [roleSwitch]),
+    roleSwitchRow,
     el("div", { class: "auth-switch" }, ["Don't have an account? ", el("a", { href: "#/signup", text: "Sign up" })]),
   ]);
 
   mountAuthPage(container, card);
 }
 
-function renderSignupPage(container, roleMode = "user") {
+// renderAuthError renders a login/signup failure into a status element,
+// adding a contextual link for the two failure codes that have an
+// obvious next step (per hand-tested feedback: "no account with this
+// email" should point at signup, "email already exists" should point at
+// login — a plain error message with no way forward is a dead end).
+function renderAuthError(statusEl, err, opts = {}) {
+  clear(statusEl);
+  if (err.code === "no_account" && opts.onSignupLink) {
+    statusEl.appendChild(document.createTextNode(err.message + " "));
+    const link = el("a", { href: "#/signup", text: "Sign up" });
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      opts.onSignupLink();
+    });
+    statusEl.appendChild(link);
+    return;
+  }
+  if (err.code === "email_taken" && opts.onLoginLink) {
+    statusEl.appendChild(document.createTextNode(err.message + " "));
+    const link = el("a", { href: "#/login", text: "Log in" });
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      opts.onLoginLink();
+    });
+    statusEl.appendChild(link);
+    return;
+  }
+  statusEl.textContent = err.message;
+}
+
+// renderSignupPage decides the mode itself (rather than offering a
+// toggle): a fresh instance's very first account is always the
+// admin/owner, so signup only ever asks "create the admin account" until
+// one exists, then only ever regular _users signup after that — see
+// GET /api/setup-status.
+async function renderSignupPage(container, gen) {
+  const status = await fetchSetupStatus();
+  if (gen !== undefined && gen !== navGeneration) return; // superseded by a newer navigation
+  renderSignupForm(container, status.admin_exists ? "user" : "admin");
+}
+
+function renderSignupForm(container, roleMode) {
   const firstName = el("input", { type: "text", placeholder: "First name", autocomplete: "given-name" });
   const lastName = el("input", { type: "text", placeholder: "Last name", autocomplete: "family-name" });
   const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "username" });
@@ -489,16 +699,9 @@ function renderSignupPage(container, roleMode = "user") {
         return;
       }
       try {
+        let resp;
         if (roleMode === "admin") {
-          const resp = await api("/api/admins/signup", {
-            method: "POST",
-            body: JSON.stringify({ email: email.value.trim(), password: passwordInput.value }),
-          });
-          setToken(resp.token);
-          setRole("admin");
-          sessionStorage.setItem("onebox_admin_record", JSON.stringify(resp.record));
-        } else {
-          const resp = await api("/api/auth/signup", {
+          resp = await api("/api/admins/signup", {
             method: "POST",
             body: JSON.stringify({
               email: email.value.trim(),
@@ -507,100 +710,174 @@ function renderSignupPage(container, roleMode = "user") {
               last_name: lastName.value.trim(),
             }),
           });
-          setToken(resp.token);
+          setRole("admin");
+        } else {
+          resp = await api("/api/auth/signup", {
+            method: "POST",
+            body: JSON.stringify({
+              email: email.value.trim(),
+              password: passwordInput.value,
+              first_name: firstName.value.trim(),
+              last_name: lastName.value.trim(),
+            }),
+          });
           setRole("user");
         }
+        setToken(resp.token);
         accountCache = null;
         toastSuccess("Account created");
-        location.hash = "#/home"; // triggers navigate() via the hashchange listener
+
+        clear(container);
+        container.appendChild(authBackground());
+        container.appendChild(
+          el("div", { class: "auth-shell page-transition" }, [
+            emergencyKitCard({
+              email: email.value.trim(),
+              phrase: resp.recovery_phrase,
+              continueLabel: "Continue to onebox",
+              onContinue: () => {
+                location.hash = "#/home"; // triggers navigate() via the hashchange listener
+              },
+            }),
+          ])
+        );
       } catch (e) {
-        status.textContent = e.message;
+        renderAuthError(status, e, { onLoginLink: () => renderLoginPage(container) });
       }
     }
   );
 
-  const roleSwitch = el("button", {
-    type: "button",
-    class: "link-btn",
-    text:
-      roleMode === "admin"
-        ? "Sign up as a regular user instead"
-        : "Setting up onebox for the first time? Create the admin account",
-  });
-  roleSwitch.addEventListener("click", () => {
-    clear(container);
-    renderSignupPage(container, roleMode === "admin" ? "user" : "admin");
-  });
-
-  const fields =
-    roleMode === "admin"
-      ? [el("label", {}, ["Email", email]), el("label", {}, ["Password", passwordWrap]), el("label", {}, ["Confirm password", confirmWrap])]
-      : [
-          el("div", { class: "row" }, [
-            el("label", { style: "flex:1" }, ["First name", firstName]),
-            el("label", { style: "flex:1" }, ["Last name", lastName]),
-          ]),
-          el("label", {}, ["Email", email]),
-          el("label", {}, ["Password", passwordWrap]),
-          el("label", {}, ["Confirm password", confirmWrap]),
-        ];
+  const fields = [
+    el("div", { class: "row" }, [
+      el("label", { style: "flex:1" }, ["First name", firstName]),
+      el("label", { style: "flex:1" }, ["Last name", lastName]),
+    ]),
+    el("label", {}, ["Email", email]),
+    el("label", {}, ["Password", passwordWrap]),
+    el("label", {}, ["Confirm password", confirmWrap]),
+  ];
 
   const card = el("div", { class: "auth-card" }, [
     ...authBrandBlock(),
-    el("h2", { class: "auth-title", text: roleMode === "admin" ? "Create the admin account" : "Sign up" }),
+    el("h2", { class: "auth-title", text: roleMode === "admin" ? "Set up your onebox instance" : "Sign up" }),
+    roleMode === "admin"
+      ? el("p", { class: "muted", style: "font-size:0.86rem" }, ["This is the first account on this onebox instance, so it becomes the admin/owner account."])
+      : null,
     el("div", { class: "col" }, fields.concat([submitBtn, status])),
-    el("div", { class: "auth-role-switch" }, [roleSwitch]),
     el("div", { class: "auth-switch" }, ["Already have an account? ", el("a", { href: "#/login", text: "Log in" })]),
   ]);
 
   mountAuthPage(container, card);
 }
 
-function renderForgotPasswordPage(container) {
-  const token = el("input", { type: "text", placeholder: "Reset token from your admin" });
-  const { input: newPw, wrap: newPwWrap } = passwordField("New password", "new-password");
-  const { input: confirmPw, wrap: confirmPwWrap } = passwordField("Confirm new password", "new-password");
+function renderForgotPasswordPage(container, mode = "phrase", roleMode = "user") {
   const status = el("div", { class: "field-error" });
+  let fields, submitBtn;
 
-  const submitBtn = actionButton("Reset password", { style: "width:100%;justify-content:center" }, async () => {
-    clear(status);
-    if (!token.value.trim()) {
-      status.textContent = "Paste the reset token your admin gave you.";
-      return;
-    }
-    if (newPw.value.length < 8) {
-      status.textContent = "Password must be at least 8 characters.";
-      return;
-    }
-    if (newPw.value !== confirmPw.value) {
-      status.textContent = "Passwords don't match.";
-      return;
-    }
-    try {
-      await api("/api/auth/reset-password", {
-        method: "POST",
-        body: JSON.stringify({ token: token.value.trim(), new_password: newPw.value }),
-      });
-      toastSuccess("Password reset — log in with your new password");
-      location.hash = "#/login"; // triggers navigate() via the hashchange listener
-    } catch (e) {
-      status.textContent = e.message;
-    }
+  if (mode === "phrase") {
+    const email = el("input", { type: "email", placeholder: "you@example.com", autocomplete: "username" });
+    const phrase = el("textarea", { rows: "2", placeholder: "twelve words, separated by spaces" });
+    const { input: newPw, wrap: newPwWrap } = passwordField("New password", "new-password");
+    const { input: confirmPw, wrap: confirmPwWrap } = passwordField("Confirm new password", "new-password");
+
+    submitBtn = actionButton("Reset password", { style: "width:100%;justify-content:center" }, async () => {
+      clear(status);
+      if (!email.value.trim() || !phrase.value.trim()) {
+        status.textContent = "Enter your email and your 12-word recovery phrase.";
+        return;
+      }
+      if (newPw.value.length < 8) {
+        status.textContent = "Password must be at least 8 characters.";
+        return;
+      }
+      if (newPw.value !== confirmPw.value) {
+        status.textContent = "Passwords don't match.";
+        return;
+      }
+      try {
+        await api("/api/auth/recover-password", {
+          method: "POST",
+          body: JSON.stringify({ email: email.value.trim(), recovery_phrase: phrase.value, new_password: newPw.value, role: roleMode }),
+        });
+        toastSuccess("Password reset — log in with your new password");
+        location.hash = "#/login"; // triggers navigate() via the hashchange listener
+      } catch (e) {
+        status.textContent = e.message;
+      }
+    });
+
+    fields = [
+      el("label", {}, ["Email", email]),
+      el("label", {}, ["12-word recovery phrase", phrase]),
+      el("label", {}, ["New password", newPwWrap]),
+      el("label", {}, ["Confirm new password", confirmPwWrap]),
+    ];
+  } else {
+    const token = el("input", { type: "text", placeholder: "Reset code from your admin" });
+    const { input: newPw, wrap: newPwWrap } = passwordField("New password", "new-password");
+    const { input: confirmPw, wrap: confirmPwWrap } = passwordField("Confirm new password", "new-password");
+
+    submitBtn = actionButton("Reset password", { style: "width:100%;justify-content:center" }, async () => {
+      clear(status);
+      if (!token.value.trim()) {
+        status.textContent = "Paste the reset code your admin gave you.";
+        return;
+      }
+      if (newPw.value.length < 8) {
+        status.textContent = "Password must be at least 8 characters.";
+        return;
+      }
+      if (newPw.value !== confirmPw.value) {
+        status.textContent = "Passwords don't match.";
+        return;
+      }
+      try {
+        await api("/api/auth/reset-password", {
+          method: "POST",
+          body: JSON.stringify({ token: token.value.trim(), new_password: newPw.value }),
+        });
+        toastSuccess("Password reset — log in with your new password");
+        location.hash = "#/login"; // triggers navigate() via the hashchange listener
+      } catch (e) {
+        status.textContent = e.message;
+      }
+    });
+
+    fields = [el("label", {}, ["Reset code", token]), el("label", {}, ["New password", newPwWrap]), el("label", {}, ["Confirm new password", confirmPwWrap])];
+  }
+
+  const modeSwitch = el("button", {
+    type: "button",
+    class: "link-btn",
+    text: mode === "phrase" ? "I have a reset code from my admin instead" : "I have my recovery phrase instead",
   });
+  modeSwitch.addEventListener("click", () => {
+    clear(container);
+    renderForgotPasswordPage(container, mode === "phrase" ? "token" : "phrase", roleMode);
+  });
+
+  const roleSwitch = el("button", {
+    type: "button",
+    class: "link-btn",
+    text: roleMode === "admin" ? "Recovering a regular user account instead?" : "Recovering an admin account instead?",
+  });
+  roleSwitch.addEventListener("click", () => {
+    clear(container);
+    renderForgotPasswordPage(container, mode, roleMode === "admin" ? "user" : "admin");
+  });
+
+  const explainer =
+    mode === "phrase"
+      ? "Enter the email and the 12-word recovery phrase you saved when you created your account."
+      : "onebox doesn't send reset emails yet — ask whoever administers your onebox instance to generate a one-time reset code from Settings → Admins, then paste it below.";
 
   const card = el("div", { class: "auth-card" }, [
     ...authBrandBlock(),
     el("h2", { class: "auth-title", text: "Reset your password" }),
-    el("p", { class: "muted", style: "font-size:0.86rem" }, [
-      "onebox doesn't send reset emails yet — ask whoever administers your onebox instance to generate a one-time reset token from their dashboard's Settings page, then paste it below.",
-    ]),
-    el("div", { class: "col" }, [
-      el("label", {}, ["Reset token", token]),
-      el("label", {}, ["New password", newPwWrap]),
-      el("label", {}, ["Confirm new password", confirmPwWrap]),
-      submitBtn,
-      status,
-    ]),
+    el("p", { class: "muted", style: "font-size:0.86rem", text: explainer }),
+    el("div", { class: "col" }, fields.concat([submitBtn, status])),
+    el("div", { class: "auth-role-switch" }, [modeSwitch]),
+    mode === "phrase" ? el("div", { class: "auth-role-switch" }, [roleSwitch]) : null,
     el("div", { class: "auth-switch" }, [el("a", { href: "#/login", text: "← Back to log in" })]),
   ]);
 
@@ -746,35 +1023,20 @@ async function renderHome(container) {
 
 async function renderAccount(container) {
   container.appendChild(el("h2", { text: "Account" }));
-
-  if (isAdminRole()) {
-    const account = await loadAccount();
-    container.appendChild(
-      el("div", { class: "card" }, [
-        el("div", { class: "account-header" }, [avatarNode(account, "avatar-lg"), el("div", { class: "account-header-name", text: account ? account.email : "Admin" })]),
-        el("p", { class: "muted", text: "Admin accounts don't have profile fields (name, phone, avatar) or self-service password change in v0.2 — those are v0.2 additions to regular user accounts only. Use Settings to manage instance-wide configuration." }),
-      ])
-    );
-    return;
-  }
-
+  const admin = isAdminRole();
   const account = await loadAccount(true);
-  const firstName = el("input", { type: "text", value: account.first_name || "", autocomplete: "given-name" });
-  const lastName = el("input", { type: "text", value: account.last_name || "", autocomplete: "family-name" });
-  const email = el("input", { type: "email", value: account.email || "", autocomplete: "username" });
-  const phone = el("input", { type: "tel", value: account.phone || "", autocomplete: "tel", placeholder: "optional" });
-  const profileStatus = el("div", { class: "error-text" });
 
   const avatarSlot = avatarNode(account, "avatar-lg");
   const avatarInput = el("input", { type: "file", accept: "image/*" });
   const avatarStatus = el("div", { class: "error-text" });
+  const avatarEndpoint = admin ? "/api/admins/me/avatar" : "/api/auth/me/avatar";
   const avatarBtn = actionButton("Upload photo", { class: "btn-secondary" }, async () => {
     clear(avatarStatus);
     if (!avatarInput.files[0]) return;
     const form = new FormData();
     form.append("file", avatarInput.files[0]);
     try {
-      const updated = await api("/api/auth/me/avatar", { method: "POST", body: form });
+      const updated = await api(avatarEndpoint, { method: "POST", body: form });
       accountCache = updated;
       fillAvatarNode(avatarSlot, updated);
       avatarInput.value = "";
@@ -782,28 +1044,6 @@ async function renderAccount(container) {
       refreshAccountSummary();
     } catch (e) {
       avatarStatus.textContent = e.message;
-      throw e;
-    }
-  });
-
-  const saveProfileBtn = actionButton("Save changes", { loadingLabel: "Saving..." }, async () => {
-    clear(profileStatus);
-    try {
-      const updated = await api("/api/auth/me", {
-        method: "PATCH",
-        body: JSON.stringify({
-          email: email.value.trim(),
-          first_name: firstName.value.trim(),
-          last_name: lastName.value.trim(),
-          phone: phone.value.trim(),
-        }),
-      });
-      accountCache = updated;
-      toastSuccess("Profile updated");
-      refreshAccountSummary();
-    } catch (e) {
-      profileStatus.textContent = e.message;
-      toastError("Couldn't save profile: " + e.message);
       throw e;
     }
   });
@@ -821,23 +1061,90 @@ async function renderAccount(container) {
     ])
   );
 
+  const firstName = el("input", { type: "text", value: account.first_name || "", autocomplete: "given-name" });
+  const lastName = el("input", { type: "text", value: account.last_name || "", autocomplete: "family-name" });
+  const phone = el("input", { type: "tel", value: account.phone || "", autocomplete: "tel", placeholder: "optional" });
+  const profileStatus = el("div", { class: "error-text" });
+
+  const profileFields = [
+    el("div", { class: "row" }, [
+      el("label", { style: "flex:1" }, ["First name", firstName]),
+      el("label", { style: "flex:1" }, ["Last name", lastName]),
+    ]),
+  ];
+  let email;
+  if (admin) {
+    profileFields.push(el("label", {}, ["Email", el("input", { type: "email", value: account.email || "", disabled: "disabled" })]));
+  } else {
+    email = el("input", { type: "email", value: account.email || "", autocomplete: "username" });
+    profileFields.push(el("label", {}, ["Email", email]));
+  }
+  profileFields.push(el("label", {}, ["Phone (optional)", phone]));
+
+  const saveProfileBtn = actionButton("Save changes", { loadingLabel: "Saving..." }, async () => {
+    clear(profileStatus);
+    try {
+      const body = { first_name: firstName.value.trim(), last_name: lastName.value.trim(), phone: phone.value.trim() };
+      if (!admin) body.email = email.value.trim();
+      const updated = await api(admin ? "/api/admins/me" : "/api/auth/me", { method: "PATCH", body: JSON.stringify(body) });
+      accountCache = updated;
+      toastSuccess("Profile updated");
+      refreshAccountSummary();
+    } catch (e) {
+      profileStatus.textContent = e.message;
+      toastError("Couldn't save profile: " + e.message);
+      throw e;
+    }
+  });
+
   container.appendChild(
-    el("div", { class: "card" }, [
-      el("h3", { text: "Profile" }),
-      el("div", { class: "col" }, [
-        el("div", { class: "row" }, [
-          el("label", { style: "flex:1" }, ["First name", firstName]),
-          el("label", { style: "flex:1" }, ["Last name", lastName]),
-        ]),
-        el("label", {}, ["Email", email]),
-        el("label", {}, ["Phone (optional)", phone]),
-        saveProfileBtn,
-        profileStatus,
-      ]),
-    ])
+    el("div", { class: "card" }, [el("h3", { text: "Profile" }), el("div", { class: "col" }, profileFields.concat([saveProfileBtn, profileStatus]))])
   );
 
-  container.appendChild(renderChangePasswordCard());
+  if (admin) {
+    container.appendChild(
+      el("div", { class: "card" }, [
+        el("h3", { text: "Password" }),
+        el("p", { class: "muted", text: "Admin accounts don't have self-service password change yet — use \"Regenerate recovery phrase\" below (it needs your current password too), or ask another admin to help." }),
+      ])
+    );
+  } else {
+    container.appendChild(renderChangePasswordCard());
+  }
+
+  container.appendChild(renderRecoveryPhraseCard());
+}
+
+function renderRecoveryPhraseCard() {
+  const { input: currentPw, wrap: currentPwWrap } = passwordField("Current password", "current-password");
+  const status = el("div", { class: "error-text" });
+
+  const submitBtn = actionButton("Regenerate recovery phrase", { class: "btn-secondary", loadingLabel: "Generating..." }, async () => {
+    clear(status);
+    if (!currentPw.value) {
+      status.textContent = "Enter your current password.";
+      return;
+    }
+    try {
+      const resp = await api("/api/auth/regenerate-recovery-phrase", {
+        method: "POST",
+        body: JSON.stringify({ current_password: currentPw.value }),
+      });
+      currentPw.value = "";
+      const account = await loadAccount(true);
+      await showEmergencyKitModal({ email: account.email, phrase: resp.recovery_phrase, continueLabel: "Done" });
+      toastSuccess("New recovery phrase generated — the old one no longer works");
+    } catch (e) {
+      status.textContent = e.message;
+      throw e;
+    }
+  });
+
+  return el("div", { class: "card" }, [
+    el("h3", { text: "Recovery phrase" }),
+    el("p", { class: "muted", text: "Your recovery phrase resets your password from the \"forgot password\" page without needing an admin. Regenerating it invalidates the old one immediately — save the new one." }),
+    el("div", { class: "col" }, [el("label", {}, ["Current password", currentPwWrap]), submitBtn, status]),
+  ]);
 }
 
 function renderChangePasswordCard() {
@@ -1540,8 +1847,8 @@ async function renderSettings(container) {
     });
     return { key, input, secret: true, label };
   }
-  function textField(key, label, placeholder) {
-    const input = el("input", { type: "text", value: current[key] || "", placeholder: placeholder || "" });
+  function textField(key, label, defaultValue) {
+    const input = el("input", { type: "text", value: current[key] || defaultValue || "", placeholder: defaultValue || "" });
     return { key, input, secret: false, label };
   }
   function selectField(key, label, options) {
@@ -1550,22 +1857,54 @@ async function renderSettings(container) {
     return { key, input, secret: false, label };
   }
 
-  const fields = [
-    secretField("anthropic_api_key", "Anthropic API key"),
-    textField("anthropic_model", "Anthropic model", "claude-sonnet-5"),
-    secretField("openai_api_key", "OpenAI API key"),
-    textField("openai_base_url", "OpenAI base URL", "https://api.openai.com/v1"),
-    selectField("embedding_provider", "Embedding provider", ["openai", "ollama"]),
-    secretField("embedding_api_key", "Embedding API key"),
-    textField("embedding_base_url", "Embedding base URL"),
-    textField("embedding_model", "Embedding model", "text-embedding-3-small"),
-    textField("ollama_base_url", "Ollama base URL", "http://localhost:11434"),
-  ];
+  // testButton makes one real (non-generating, so no API cost) request to
+  // the named provider using whatever's currently typed — falling back to
+  // whatever's already saved for any field left blank — and reports
+  // success/failure right there, before the user commits to Save.
+  function testButton(kind, overridesFn) {
+    const result = el("div", { class: "error-text" });
+    const btn = actionButton("Test connection", { class: "btn-secondary", loadingLabel: "Testing..." }, async () => {
+      clear(result);
+      try {
+        const resp = await api("/api/settings/test-connection", { method: "POST", body: JSON.stringify({ kind, ...overridesFn() }) });
+        result.className = resp.ok ? "success-text" : "error-text";
+        result.textContent = (resp.ok ? "✓ " : "✗ ") + resp.message;
+      } catch (e) {
+        result.className = "error-text";
+        result.textContent = e.message;
+        throw e;
+      }
+    });
+    return { btn, result };
+  }
 
-  const saveBtn = actionButton("Save", { loadingLabel: "Saving..." }, async () => {
+  const anthropicKey = secretField("anthropic_api_key", "Anthropic API key");
+  const anthropicModel = textField("anthropic_model", "Model", "claude-sonnet-5");
+  const anthropicTest = testButton("anthropic", () => ({ api_key: anthropicKey.input.value }));
+
+  const openaiKey = secretField("openai_api_key", "OpenAI API key");
+  const openaiBaseURL = textField("openai_base_url", "Base URL", "https://api.openai.com/v1");
+  const openaiTest = testButton("openai", () => ({ api_key: openaiKey.input.value, base_url: openaiBaseURL.input.value }));
+
+  const ollamaBaseURL = textField("ollama_base_url", "Base URL", "http://localhost:11434");
+  const ollamaTest = testButton("ollama", () => ({ base_url: ollamaBaseURL.input.value }));
+
+  const embeddingProvider = selectField("embedding_provider", "Provider", ["openai", "ollama"]);
+  const embeddingKey = secretField("embedding_api_key", "API key (if OpenAI-compatible)");
+  const embeddingBaseURL = textField("embedding_base_url", "Base URL (if OpenAI-compatible)");
+  const embeddingModel = textField("embedding_model", "Model", "text-embedding-3-small");
+  const embeddingTest = testButton("embedding", () => ({
+    embedding_provider: embeddingProvider.input.value,
+    api_key: embeddingKey.input.value,
+    base_url: embeddingProvider.input.value === "ollama" ? ollamaBaseURL.input.value : embeddingBaseURL.input.value,
+  }));
+
+  const allFields = [anthropicKey, anthropicModel, openaiKey, openaiBaseURL, ollamaBaseURL, embeddingProvider, embeddingKey, embeddingBaseURL, embeddingModel];
+
+  const saveBtn = actionButton("Save all provider settings", { loadingLabel: "Saving..." }, async () => {
     clear(status);
     const body = {};
-    for (const f of fields) {
+    for (const f of allFields) {
       if (f.secret) {
         if (f.input.value !== "") body[f.key] = f.input.value;
       } else {
@@ -1584,17 +1923,62 @@ async function renderSettings(container) {
   });
 
   container.appendChild(
-    el("div", { class: "card" }, [
-      el("h3", { text: "LLM & embedding providers" }),
-      el("p", { class: "muted", text: "Keys are encrypted at rest and never shown again once saved. Saving applies immediately, no restart needed." }),
-      el(
-        "div",
-        { class: "col" },
-        fields.map((f) => el("label", {}, [f.label, f.input])).concat([saveBtn, status])
-      ),
+    el("div", { class: "card provider-card" }, [
+      el("h3", {}, ["🤖 Anthropic"]),
+      el("p", { class: "muted", text: "Powers /api/llm/chat for claude-* models and is the default for /api/rag/answer." }),
+      el("div", { class: "col" }, [
+        el("label", {}, [anthropicKey.label, anthropicKey.input]),
+        el("label", {}, [anthropicModel.label, anthropicModel.input]),
+        anthropicTest.btn,
+        anthropicTest.result,
+      ]),
     ])
   );
 
+  container.appendChild(
+    el("div", { class: "card provider-card" }, [
+      el("h3", {}, ["🌐 OpenAI-compatible"]),
+      el("p", { class: "muted", text: "Powers /api/llm/chat for gpt-*/o1-*/o3-* models. Also works with any OpenAI-compatible API by changing the base URL." }),
+      el("div", { class: "col" }, [
+        el("label", {}, [openaiKey.label, openaiKey.input]),
+        el("label", {}, [openaiBaseURL.label, openaiBaseURL.input]),
+        openaiTest.btn,
+        openaiTest.result,
+      ]),
+    ])
+  );
+
+  container.appendChild(
+    el("div", { class: "card provider-card" }, [
+      el("h3", {}, ["🖥️ Ollama (local)"]),
+      el("p", { class: "muted", text: "Runs any other model name against a local Ollama instance — no API key needed. Shared between the LLM gateway and embeddings (below) when Ollama is selected." }),
+      el("div", { class: "col" }, [el("label", {}, [ollamaBaseURL.label, ollamaBaseURL.input]), ollamaTest.btn, ollamaTest.result]),
+    ])
+  );
+
+  container.appendChild(
+    el("div", { class: "card provider-card" }, [
+      el("h3", {}, ["📚 Embedding provider"]),
+      el("p", { class: "muted", text: "Used to ingest RAG sources and embed queries. Pick Ollama for a fully local setup, or OpenAI-compatible for a hosted embedding API." }),
+      el("div", { class: "col" }, [
+        el("label", {}, [embeddingProvider.label, embeddingProvider.input]),
+        el("label", {}, [embeddingKey.label, embeddingKey.input]),
+        el("label", {}, [embeddingBaseURL.label, embeddingBaseURL.input]),
+        el("label", {}, [embeddingModel.label, embeddingModel.input]),
+        embeddingTest.btn,
+        embeddingTest.result,
+      ]),
+    ])
+  );
+
+  container.appendChild(
+    el("div", { class: "card" }, [
+      el("p", { class: "muted", text: "Keys are encrypted at rest and never shown again once saved. Saving applies immediately, no restart needed." }),
+      el("div", { class: "col" }, [saveBtn, status]),
+    ])
+  );
+
+  container.appendChild(renderAdminManagementPanel());
   container.appendChild(renderPasswordResetPanel());
 
   container.appendChild(
@@ -1608,4 +1992,85 @@ async function renderSettings(container) {
   );
 
   container.appendChild(el("div", { class: "card" }, [el("h3", { text: "About" }), el("p", {}, ["onebox admin dashboard."])]));
+}
+
+// renderAdminManagementPanel lets an admin see every admin account and
+// remove one (refused server-side if it's the last), and promote a
+// regular user to admin by email — which creates a *separate* admin
+// login for them via a one-time reset code (see POST /api/admins/promote
+// and its doc comment for why it's a separate account rather than
+// converting the existing one).
+function renderAdminManagementPanel() {
+  const listContainer = el("div", { class: "col" }, [el("p", { class: "muted", text: "Loading…" })]);
+  const promoteEmail = el("input", { type: "email", placeholder: "user@example.com" });
+  const promoteStatus = el("div", { class: "error-text" });
+  const promoteResult = el("div", { class: "hidden" });
+
+  async function loadList() {
+    const resp = await api("/api/admins");
+    clear(listContainer);
+    const items = resp.items || [];
+    for (const a of items) {
+      const name = [a.first_name, a.last_name].filter(Boolean).join(" ").trim();
+      const label = name ? name + " — " + a.email : a.email;
+      const demoteBtn = deleteButton("Demote", 'Remove admin access for "' + a.email + '"? This cannot be undone.', async () => {
+        try {
+          await api("/api/admins/demote", { method: "POST", body: JSON.stringify({ email: a.email }) });
+          toastSuccess("Removed admin access for " + a.email);
+          await loadList();
+        } catch (e) {
+          toastError(e.message);
+          throw e;
+        }
+      });
+      listContainer.appendChild(el("div", { class: "row", style: "justify-content:space-between;align-items:center" }, [el("span", { text: label }), demoteBtn]));
+    }
+  }
+
+  const promoteBtn = actionButton("Promote to admin", {}, async () => {
+    clear(promoteStatus);
+    promoteResult.classList.add("hidden");
+    if (!promoteEmail.value.trim()) return;
+    try {
+      const resp = await api("/api/admins/promote", { method: "POST", body: JSON.stringify({ email: promoteEmail.value.trim() }) });
+      clear(promoteResult);
+      promoteResult.classList.remove("hidden");
+      promoteResult.appendChild(
+        el("p", {
+          class: "muted",
+          text:
+            "Give this reset code to " +
+            resp.email +
+            " — it expires " +
+            new Date(resp.expires_at).toLocaleString() +
+            " and can only be used once. They redeem it at Forgot password → \"I have a reset code from my admin\".",
+        })
+      );
+      promoteResult.appendChild(el("input", { readonly: "readonly", value: resp.reset_token, onclick: (e) => e.target.select() }));
+      promoteEmail.value = "";
+      toastSuccess("Promoted — share the reset code to finish");
+      await loadList();
+    } catch (e) {
+      promoteStatus.textContent = e.message;
+      throw e;
+    }
+  });
+
+  const card = el("div", { class: "card" }, [
+    el("h3", { text: "Admins" }),
+    el("p", {
+      class: "muted",
+      text: "Anyone with admin access can manage collections, settings, and every account's data. Promoting someone creates a separate admin login for them — their regular user account, if they have one, is untouched.",
+    }),
+    listContainer,
+    el("div", { class: "col", style: "margin-top:12px" }, [
+      el("label", {}, ["Promote a user to admin (by email)", promoteEmail]),
+      promoteBtn,
+      promoteStatus,
+      promoteResult,
+    ]),
+  ]);
+
+  loadList();
+  return card;
 }

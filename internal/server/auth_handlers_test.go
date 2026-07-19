@@ -80,7 +80,7 @@ func TestSignup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, sqlDB := newTestServer(t)
 			if tt.seedEmail != "" {
-				if _, err := createUser(t.Context(), sqlDB, tt.seedEmail, "irrelevant-hash", "", ""); err != nil {
+				if _, err := createUser(t.Context(), sqlDB, tt.seedEmail, "irrelevant-hash", "", "", ""); err != nil {
 					t.Fatalf("seed user: %v", err)
 				}
 			}

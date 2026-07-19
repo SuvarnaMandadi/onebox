@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -100,5 +101,76 @@ func TestAdminLoginMixedCaseEmail(t *testing.T) {
 	loginRec := doJSON(t, srv, http.MethodPost, "/api/admins/login", authRequest{Email: "ROOT@EXAMPLE.COM", Password: "hunter22222"})
 	if loginRec.Code != http.StatusOK {
 		t.Fatalf("login status = %d, want 200, body = %s", loginRec.Code, loginRec.Body.String())
+	}
+}
+
+// TestLoginErrorMessagesDistinguishCause covers the hand-tested feedback
+// that "invalid credentials" was shown even when no account exists at
+// all — login (both _users and _admins) should say "no_account" for an
+// unknown email and "invalid_credentials" only for a wrong password on an
+// account that does exist.
+func TestLoginErrorMessagesDistinguishCause(t *testing.T) {
+	srv, _ := newTestServer(t)
+	signupUser(t, srv, "known@example.com")
+
+	t.Run("unknown user email", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "nobody@example.com", Password: "irrelevant1"})
+		assertErrorCode(t, rec, http.StatusUnauthorized, "no_account")
+	})
+	t.Run("known user email, wrong password", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "known@example.com", Password: "wrong-password"})
+		assertErrorCode(t, rec, http.StatusUnauthorized, "invalid_credentials")
+	})
+
+	bootstrapAdmin(t, srv)
+	t.Run("unknown admin email", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/admins/login", authRequest{Email: "nobody@example.com", Password: "irrelevant1"})
+		assertErrorCode(t, rec, http.StatusUnauthorized, "no_account")
+	})
+	t.Run("known admin email, wrong password", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/admins/login", authRequest{Email: "admin@example.com", Password: "wrong-password"})
+		assertErrorCode(t, rec, http.StatusUnauthorized, "invalid_credentials")
+	})
+}
+
+func assertErrorCode(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
+	t.Helper()
+	if rec.Code != wantStatus {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, wantStatus, rec.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if env.Code != wantCode {
+		t.Fatalf("code = %q, want %q, body = %s", env.Code, wantCode, rec.Body.String())
+	}
+}
+
+func TestSetupStatus(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/setup-status", nil)
+	var before struct {
+		AdminExists bool `json:"admin_exists"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &before); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if before.AdminExists {
+		t.Fatalf("expected admin_exists = false before any admin signs up")
+	}
+
+	bootstrapAdmin(t, srv)
+
+	rec = doJSON(t, srv, http.MethodGet, "/api/setup-status", nil)
+	var after struct {
+		AdminExists bool `json:"admin_exists"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &after); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !after.AdminExists {
+		t.Fatalf("expected admin_exists = true after bootstrapping an admin")
 	}
 }

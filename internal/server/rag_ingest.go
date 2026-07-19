@@ -3,11 +3,26 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 
 	"onebox/internal/embeddings"
 )
+
+// providerBaseURL extracts the configured base URL from a concrete
+// embeddings.Provider, for a friendlier "not reachable at <url>" error
+// message. Returns "" for provider types with no meaningful URL.
+func providerBaseURL(p embeddings.Provider) string {
+	switch v := p.(type) {
+	case *embeddings.OllamaProvider:
+		return v.BaseURL
+	case *embeddings.OpenAIProvider:
+		return v.BaseURL
+	default:
+		return ""
+	}
+}
 
 // ingestSource runs extract -> chunk -> embed -> store for one source in
 // the background (kicked off by handleCreateRAGSource via `go`). Failures
@@ -34,13 +49,13 @@ func ingestSource(sqlDB *sql.DB, provider embeddings.Provider, ownerID string, s
 	}
 
 	if provider == nil {
-		failIngest(ctx, sqlDB, src.ID, fmt.Errorf("no embedding provider configured (set ONEBOX_EMBEDDING_API_KEY or run Ollama)"))
+		failIngest(ctx, sqlDB, src.ID, fmt.Errorf("no embedding provider configured — set an embedding provider in Settings → Providers (Ollama or an API key)"))
 		return
 	}
 
 	vectors, err := provider.Embed(ctx, chunks)
 	if err != nil {
-		failIngest(ctx, sqlDB, src.ID, fmt.Errorf("embed chunks: %w", err))
+		failIngest(ctx, sqlDB, src.ID, errors.New(humanizeProviderError(err, "Embedding provider", providerBaseURL(provider))))
 		return
 	}
 

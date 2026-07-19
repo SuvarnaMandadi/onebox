@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -171,4 +172,191 @@ func TestUploadAvatar(t *testing.T) {
 			t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func TestSignupIncludesRecoveryPhraseOnce(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "recovery@example.com", Password: "hunter22222"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp authResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	words := len(splitFields(resp.RecoveryPhrase))
+	if words != 12 {
+		t.Fatalf("recovery phrase has %d words, want 12: %q", words, resp.RecoveryPhrase)
+	}
+
+	// GET /api/auth/me must never expose it again — only its hash is kept.
+	meRec := doAuth(t, srv, http.MethodGet, "/api/auth/me", resp.Token, nil)
+	if strings.Contains(meRec.Body.String(), "recovery_phrase") {
+		t.Fatalf("GET /api/auth/me leaked recovery phrase field: %s", meRec.Body.String())
+	}
+}
+
+func TestAdminSignupIncludesRecoveryPhraseOnce(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/admins/signup", authRequest{Email: "admin@example.com", Password: "hunter22222"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp adminAuthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(splitFields(resp.RecoveryPhrase)) != 12 {
+		t.Fatalf("recovery phrase has %d words, want 12: %q", len(splitFields(resp.RecoveryPhrase)), resp.RecoveryPhrase)
+	}
+}
+
+func TestRecoverPasswordForUser(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+
+	signupRec := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "forgetful@example.com", Password: "hunter22222"})
+	var signupResp authResponse
+	json.Unmarshal(signupRec.Body.Bytes(), &signupResp)
+
+	t.Run("wrong phrase rejected", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/auth/recover-password", recoverPasswordRequest{
+			Email: "forgetful@example.com", RecoveryPhrase: "wrong words entirely not the real phrase at all whatsoever nope",
+			NewPassword: "brand-new-password-1",
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("correct phrase resets password", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/auth/recover-password", recoverPasswordRequest{
+			Email: "forgetful@example.com", RecoveryPhrase: signupResp.RecoveryPhrase,
+			NewPassword: "brand-new-password-1",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+
+		loginRec := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "forgetful@example.com", Password: "brand-new-password-1"})
+		if loginRec.Code != http.StatusOK {
+			t.Fatalf("login with new password: status = %d, body = %s", loginRec.Code, loginRec.Body.String())
+		}
+	})
+
+	t.Run("case and whitespace insensitive", func(t *testing.T) {
+		messyPhrase := "  " + strings.ToUpper(signupResp.RecoveryPhrase) + "  "
+		rec := doJSON(t, srv, http.MethodPost, "/api/auth/recover-password", recoverPasswordRequest{
+			Email: "forgetful@example.com", RecoveryPhrase: messyPhrase,
+			NewPassword: "another-new-password-2",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestRecoverPasswordForAdmin(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+
+	signupRec := doJSON(t, srv, http.MethodPost, "/api/admins/signup", authRequest{Email: "admin@example.com", Password: "hunter22222"})
+	var signupResp adminAuthResponse
+	json.Unmarshal(signupRec.Body.Bytes(), &signupResp)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/auth/recover-password", recoverPasswordRequest{
+		Email: "admin@example.com", RecoveryPhrase: signupResp.RecoveryPhrase,
+		NewPassword: "brand-new-admin-password-1", Role: "admin",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	loginRec := doJSON(t, srv, http.MethodPost, "/api/admins/login", authRequest{Email: "admin@example.com", Password: "brand-new-admin-password-1"})
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("admin login with new password: status = %d, body = %s", loginRec.Code, loginRec.Body.String())
+	}
+
+	// A "role":"admin" recovery request must not touch a _users account
+	// that happens to share the email.
+	t.Run("wrong role does not cross accounts", func(t *testing.T) {
+		srv2 := newTestServerWithFiles(t)
+		userSignupRec := doJSON(t, srv2, http.MethodPost, "/api/auth/signup", authRequest{Email: "shared@example.com", Password: "hunter22222"})
+		var userResp authResponse
+		json.Unmarshal(userSignupRec.Body.Bytes(), &userResp)
+
+		rec := doJSON(t, srv2, http.MethodPost, "/api/auth/recover-password", recoverPasswordRequest{
+			Email: "shared@example.com", RecoveryPhrase: userResp.RecoveryPhrase,
+			NewPassword: "irrelevant-password-1", Role: "admin",
+		})
+		if rec.Code == http.StatusOK {
+			t.Fatalf("a user's recovery phrase must not work against role=admin (no admin exists at all here)")
+		}
+	})
+}
+
+func TestRegenerateRecoveryPhrase(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+	signupRec := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "regen@example.com", Password: "hunter22222"})
+	var signupResp authResponse
+	json.Unmarshal(signupRec.Body.Bytes(), &signupResp)
+
+	t.Run("wrong current password rejected", func(t *testing.T) {
+		rec := doAuth(t, srv, http.MethodPost, "/api/auth/regenerate-recovery-phrase", signupResp.Token, regenerateRecoveryPhraseRequest{CurrentPassword: "wrong"})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	rec := doAuth(t, srv, http.MethodPost, "/api/auth/regenerate-recovery-phrase", signupResp.Token, regenerateRecoveryPhraseRequest{CurrentPassword: "hunter22222"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var regenResp struct {
+		RecoveryPhrase string `json:"recovery_phrase"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &regenResp)
+	if regenResp.RecoveryPhrase == "" || regenResp.RecoveryPhrase == signupResp.RecoveryPhrase {
+		t.Fatalf("expected a fresh, different recovery phrase, got %q (original was %q)", regenResp.RecoveryPhrase, signupResp.RecoveryPhrase)
+	}
+
+	t.Run("old phrase no longer works", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/auth/recover-password", recoverPasswordRequest{
+			Email: "regen@example.com", RecoveryPhrase: signupResp.RecoveryPhrase, NewPassword: "whatever-password-1",
+		})
+		if rec.Code == http.StatusOK {
+			t.Fatalf("the old recovery phrase must be invalidated after regenerating")
+		}
+	})
+	t.Run("new phrase works", func(t *testing.T) {
+		rec := doJSON(t, srv, http.MethodPost, "/api/auth/recover-password", recoverPasswordRequest{
+			Email: "regen@example.com", RecoveryPhrase: regenResp.RecoveryPhrase, NewPassword: "whatever-password-2",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestRegenerateRecoveryPhraseForAdmin(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+	signupRec := doJSON(t, srv, http.MethodPost, "/api/admins/signup", authRequest{Email: "admin@example.com", Password: "hunter22222"})
+	var signupResp adminAuthResponse
+	json.Unmarshal(signupRec.Body.Bytes(), &signupResp)
+
+	rec := doAuth(t, srv, http.MethodPost, "/api/auth/regenerate-recovery-phrase", signupResp.Token, regenerateRecoveryPhraseRequest{CurrentPassword: "hunter22222"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var regenResp struct {
+		RecoveryPhrase string `json:"recovery_phrase"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &regenResp)
+	if regenResp.RecoveryPhrase == "" || regenResp.RecoveryPhrase == signupResp.RecoveryPhrase {
+		t.Fatalf("expected a fresh, different recovery phrase")
+	}
+}
+
+func splitFields(s string) []string {
+	return strings.Fields(s)
 }

@@ -142,11 +142,13 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", s.handleHealth)
+		r.Get("/setup-status", s.handleSetupStatus)
 
 		r.Route("/auth", func(r chi.Router) {
 			r.Post("/signup", s.handleSignup)
 			r.Post("/login", s.handleLogin)
 			r.Post("/reset-password", s.handleResetPassword)
+			r.Post("/recover-password", s.handleRecoverPassword)
 
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireUserAuth)
@@ -155,12 +157,24 @@ func (s *Server) Router() http.Handler {
 				r.Post("/me/avatar", s.handleUploadAvatar)
 				r.Post("/change-password", s.handleChangePassword)
 			})
+
+			r.With(s.requireAnyAuth).Post("/regenerate-recovery-phrase", s.handleRegenerateRecoveryPhrase)
 		})
 
 		r.Route("/admins", func(r chi.Router) {
 			r.Post("/signup", s.handleAdminSignup)
 			r.Post("/login", s.handleAdminLogin)
 			r.With(s.requireAdminAuth).Post("/password-resets", s.handleCreatePasswordReset)
+
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireAdminAuth)
+				r.Get("/", s.handleListAdmins)
+				r.Post("/promote", s.handlePromoteToAdmin)
+				r.Post("/demote", s.handleDemoteAdmin)
+				r.Get("/me", s.handleAdminMe)
+				r.Patch("/me", s.handleUpdateAdminMe)
+				r.Post("/me/avatar", s.handleUploadAdminAvatar)
+			})
 		})
 
 		r.With(s.realtimeAuth).Get("/realtime", s.handleRealtime)
@@ -190,6 +204,7 @@ func (s *Server) Router() http.Handler {
 			r.Use(s.requireAdminAuth)
 			r.Get("/", s.handleGetSettings)
 			r.Put("/", s.handleUpdateSettings)
+			r.Post("/test-connection", s.handleTestConnection)
 		})
 
 		r.Route("/collections", func(r chi.Router) {

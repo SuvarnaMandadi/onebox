@@ -12,28 +12,29 @@ import (
 
 // user is a row from _users.
 type user struct {
-	ID           string `json:"id"`
-	Email        string `json:"email"`
-	PasswordHash string `json:"-"`
-	Verified     bool   `json:"verified"`
-	FirstName    string `json:"first_name"`
-	LastName     string `json:"last_name"`
-	Phone        string `json:"phone"`
-	AvatarFileID string `json:"avatar_file_id,omitempty"`
-	Created      string `json:"created"`
-	Updated      string `json:"updated"`
+	ID                 string `json:"id"`
+	Email              string `json:"email"`
+	PasswordHash       string `json:"-"`
+	Verified           bool   `json:"verified"`
+	FirstName          string `json:"first_name"`
+	LastName           string `json:"last_name"`
+	Phone              string `json:"phone"`
+	AvatarFileID       string `json:"avatar_file_id,omitempty"`
+	RecoveryPhraseHash string `json:"-"`
+	Created            string `json:"created"`
+	Updated            string `json:"updated"`
 }
 
 var errEmailTaken = errors.New("email already registered")
 
-const userColumns = "id, email, password_hash, verified, first_name, last_name, phone, avatar_file_id, created, updated"
+const userColumns = "id, email, password_hash, verified, first_name, last_name, phone, avatar_file_id, recovery_phrase_hash, created, updated"
 
-func createUser(ctx context.Context, sqlDB *sql.DB, email, passwordHash, firstName, lastName string) (*user, error) {
+func createUser(ctx context.Context, sqlDB *sql.DB, email, passwordHash, firstName, lastName, recoveryPhraseHash string) (*user, error) {
 	id := uuid.NewString()
 
 	_, err := sqlDB.ExecContext(ctx,
-		`INSERT INTO _users (id, email, password_hash, first_name, last_name) VALUES (?, ?, ?, ?, ?)`,
-		id, email, passwordHash, firstName, lastName,
+		`INSERT INTO _users (id, email, password_hash, first_name, last_name, recovery_phrase_hash) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, email, passwordHash, firstName, lastName, recoveryPhraseHash,
 	)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
@@ -64,12 +65,13 @@ func getUserByID(ctx context.Context, sqlDB *sql.DB, id string) (*user, error) {
 func scanUser(row *sql.Row) (*user, error) {
 	var u user
 	var verified int
-	var avatarFileID sql.NullString
-	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &verified, &u.FirstName, &u.LastName, &u.Phone, &avatarFileID, &u.Created, &u.Updated); err != nil {
+	var avatarFileID, recoveryPhraseHash sql.NullString
+	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &verified, &u.FirstName, &u.LastName, &u.Phone, &avatarFileID, &recoveryPhraseHash, &u.Created, &u.Updated); err != nil {
 		return nil, err
 	}
 	u.Verified = verified != 0
 	u.AvatarFileID = avatarFileID.String
+	u.RecoveryPhraseHash = recoveryPhraseHash.String
 	return &u, nil
 }
 
@@ -108,6 +110,17 @@ func updateUserPasswordHash(ctx context.Context, sqlDB *sql.DB, id, passwordHash
 	)
 	if err != nil {
 		return fmt.Errorf("update user password: %w", err)
+	}
+	return nil
+}
+
+func updateUserRecoveryPhraseHash(ctx context.Context, sqlDB *sql.DB, id, recoveryPhraseHash string) error {
+	_, err := sqlDB.ExecContext(ctx,
+		`UPDATE _users SET recovery_phrase_hash = ?, updated = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+		recoveryPhraseHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update user recovery phrase: %w", err)
 	}
 	return nil
 }

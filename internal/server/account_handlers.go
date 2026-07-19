@@ -208,7 +208,7 @@ func (s *Server) handleCreatePasswordReset(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	token, expiresAt, err := createPasswordResetToken(r.Context(), s.db, u.ID)
+	token, expiresAt, err := createPasswordResetToken(r.Context(), s.db, "user", u.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to create reset token", nil)
 		return
@@ -221,7 +221,13 @@ func (s *Server) handleCreatePasswordReset(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func createPasswordResetToken(ctx context.Context, sqlDB *sql.DB, userID string) (token, expiresAt string, err error) {
+// createPasswordResetToken mints a one-time token for either a _users or
+// an _admins row (subjectType distinguishes which table
+// handleResetPassword should update when the token is redeemed). Used by
+// the admin-assisted reset flow and by POST /api/admins/promote (which
+// mints an admin-typed token for the newly created admin row so its
+// throwaway initial password can be replaced immediately).
+func createPasswordResetToken(ctx context.Context, sqlDB *sql.DB, subjectType, subjectID string) (token, expiresAt string, err error) {
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
 		return "", "", fmt.Errorf("generate token: %w", err)
@@ -229,7 +235,10 @@ func createPasswordResetToken(ctx context.Context, sqlDB *sql.DB, userID string)
 	token = hex.EncodeToString(buf)
 	expiresAt = time.Now().Add(passwordResetTTL).UTC().Format(time.RFC3339Nano)
 
-	_, err = sqlDB.ExecContext(ctx, `INSERT INTO _password_resets (token, user_id, expires_at) VALUES (?, ?, ?)`, token, userID, expiresAt)
+	_, err = sqlDB.ExecContext(ctx,
+		`INSERT INTO _password_resets (token, user_id, subject_type, expires_at) VALUES (?, ?, ?, ?)`,
+		token, subjectID, subjectType, expiresAt,
+	)
 	if err != nil {
 		return "", "", fmt.Errorf("insert reset token: %w", err)
 	}
@@ -259,10 +268,10 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var userID, expiresAt string
+	var subjectID, subjectType, expiresAt string
 	var used int
-	err := s.db.QueryRowContext(r.Context(), `SELECT user_id, expires_at, used FROM _password_resets WHERE token = ?`, req.Token).
-		Scan(&userID, &expiresAt, &used)
+	err := s.db.QueryRowContext(r.Context(), `SELECT user_id, subject_type, expires_at, used FROM _password_resets WHERE token = ?`, req.Token).
+		Scan(&subjectID, &subjectType, &expiresAt, &used)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusBadRequest, "invalid_token", "reset token is invalid", nil)
 		return
@@ -286,7 +295,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to process password", nil)
 		return
 	}
-	if err := updateUserPasswordHash(r.Context(), s.db, userID, hash); err != nil {
+	if err := setPasswordHashForSubject(r.Context(), s.db, subjectType, subjectID, hash); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to update password", nil)
 		return
 	}
@@ -295,4 +304,160 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// setPasswordHashForSubject dispatches to the right table's password
+// update based on the subject_type recorded on a _password_resets row.
+func setPasswordHashForSubject(ctx context.Context, sqlDB *sql.DB, subjectType, subjectID, hash string) error {
+	if subjectType == "admin" {
+		return updateAdminPasswordHash(ctx, sqlDB, subjectID, hash)
+	}
+	return updateUserPasswordHash(ctx, sqlDB, subjectID, hash)
+}
+
+type recoverPasswordRequest struct {
+	Email          string `json:"email"`
+	RecoveryPhrase string `json:"recovery_phrase"`
+	NewPassword    string `json:"new_password"`
+	Role           string `json:"role"` // "user" (default) or "admin"
+}
+
+// handleRecoverPassword is the primary self-service "forgot password"
+// path: email + the 12-word recovery phrase shown once at signup, in
+// place of a password the caller has forgotten. Unauthenticated by
+// design, same as handleResetPassword — gated by possession of the
+// phrase instead of a token.
+func (s *Server) handleRecoverPassword(w http.ResponseWriter, r *http.Request) {
+	var req recoverPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON", nil)
+		return
+	}
+	if len(req.NewPassword) < minPasswordLen {
+		writeError(w, http.StatusBadRequest, "weak_password", "password must be at least 8 characters", nil)
+		return
+	}
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	phrase := auth.NormalizeRecoveryPhrase(req.RecoveryPhrase)
+	if email == "" || phrase == "" {
+		writeError(w, http.StatusBadRequest, "invalid_body", "email and recovery_phrase are required", nil)
+		return
+	}
+
+	var id, hash, recoveryHash string
+	var updatePassword func(ctx context.Context, sqlDB *sql.DB, id, hash string) error
+
+	if req.Role == "admin" {
+		a, err := getAdminByEmail(r.Context(), s.db, email)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusBadRequest, "invalid_recovery", "email or recovery phrase is incorrect", nil)
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to look up account", nil)
+			return
+		}
+		id, recoveryHash = a.ID, a.RecoveryPhraseHash
+		updatePassword = updateAdminPasswordHash
+	} else {
+		u, err := getUserByEmail(r.Context(), s.db, email)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusBadRequest, "invalid_recovery", "email or recovery phrase is incorrect", nil)
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to look up account", nil)
+			return
+		}
+		id, recoveryHash = u.ID, u.RecoveryPhraseHash
+		updatePassword = updateUserPasswordHash
+	}
+
+	if recoveryHash == "" {
+		writeError(w, http.StatusBadRequest, "invalid_recovery", "this account has no recovery phrase set", nil)
+		return
+	}
+	ok, err := auth.VerifyPassword(phrase, recoveryHash)
+	if err != nil || !ok {
+		writeError(w, http.StatusBadRequest, "invalid_recovery", "email or recovery phrase is incorrect", nil)
+		return
+	}
+
+	hash, err = auth.HashPassword(req.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to process password", nil)
+		return
+	}
+	if err := updatePassword(r.Context(), s.db, id, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to update password", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+type regenerateRecoveryPhraseRequest struct {
+	CurrentPassword string `json:"current_password"`
+}
+
+// handleRegenerateRecoveryPhrase mints a fresh recovery phrase for
+// whichever identity (admin or user) the caller is authenticated as,
+// requiring their current password first, and invalidating the previous
+// phrase (there's only ever one hash stored, so generating a new one
+// naturally retires the old one).
+func (s *Server) handleRegenerateRecoveryPhrase(w http.ResponseWriter, r *http.Request) {
+	var req regenerateRecoveryPhraseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON", nil)
+		return
+	}
+
+	if aid, ok := authAdminID(r.Context()); ok {
+		a, err := getAdminByID(r.Context(), s.db, aid)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to load account", nil)
+			return
+		}
+		ok2, err := auth.VerifyPassword(req.CurrentPassword, a.PasswordHash)
+		if err != nil || !ok2 {
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "current password is incorrect", nil)
+			return
+		}
+		phrase, phraseHash, err := generateAndHashRecoveryPhrase()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to generate recovery phrase", nil)
+			return
+		}
+		if err := updateAdminRecoveryPhraseHash(r.Context(), s.db, aid, phraseHash); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to save recovery phrase", nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"recovery_phrase": phrase})
+		return
+	}
+
+	uid, ok := authUserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_token", "session token is invalid or expired", nil)
+		return
+	}
+	u, err := getUserByID(r.Context(), s.db, uid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to load account", nil)
+		return
+	}
+	ok2, err := auth.VerifyPassword(req.CurrentPassword, u.PasswordHash)
+	if err != nil || !ok2 {
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "current password is incorrect", nil)
+		return
+	}
+	phrase, phraseHash, err := generateAndHashRecoveryPhrase()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to generate recovery phrase", nil)
+		return
+	}
+	if err := updateUserRecoveryPhraseHash(r.Context(), s.db, uid, phraseHash); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to save recovery phrase", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recovery_phrase": phrase})
 }

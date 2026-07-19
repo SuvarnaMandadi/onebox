@@ -1,7 +1,9 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -18,6 +20,10 @@ type authRequest struct {
 type authResponse struct {
 	Token  string `json:"token"`
 	Record *user  `json:"record"`
+	// RecoveryPhrase is set only in the signup response — it's shown once
+	// so the user can save it, then only its hash is ever stored. See
+	// docs/api-reference.md for the recovery flow this backs.
+	RecoveryPhrase string `json:"recovery_phrase,omitempty"`
 }
 
 const minPasswordLen = 8
@@ -47,10 +53,16 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := createUser(r.Context(), s.db, req.Email, hash, req.FirstName, req.LastName)
+	phrase, phraseHash, err := generateAndHashRecoveryPhrase()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to generate recovery phrase", nil)
+		return
+	}
+
+	u, err := createUser(r.Context(), s.db, req.Email, hash, req.FirstName, req.LastName, phraseHash)
 	if err != nil {
 		if err == errEmailTaken {
-			writeError(w, http.StatusConflict, "email_taken", "an account with that email already exists", nil)
+			writeError(w, http.StatusConflict, "email_taken", "An account with this email already exists — log in instead?", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to create account", nil)
@@ -63,7 +75,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, authResponse{Token: token, Record: u})
+	writeJSON(w, http.StatusCreated, authResponse{Token: token, Record: u, RecoveryPhrase: phrase})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -75,14 +87,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 
 	u, err := getUserByEmail(r.Context(), s.db, req.Email)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusUnauthorized, "no_account", "No account found with this email.", nil)
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid email or password", nil)
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to look up account", nil)
 		return
 	}
 
 	ok, err := auth.VerifyPassword(req.Password, u.PasswordHash)
 	if err != nil || !ok {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid email or password", nil)
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password.", nil)
 		return
 	}
 
@@ -93,4 +109,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, authResponse{Token: token, Record: u})
+}
+
+// generateAndHashRecoveryPhrase generates a fresh recovery phrase and
+// returns both the plaintext (to show the caller once) and its hash (the
+// only copy ever persisted).
+func generateAndHashRecoveryPhrase() (phrase, hash string, err error) {
+	phrase, err = auth.GenerateRecoveryPhrase()
+	if err != nil {
+		return "", "", err
+	}
+	hash, err = auth.HashPassword(auth.NormalizeRecoveryPhrase(phrase))
+	if err != nil {
+		return "", "", err
+	}
+	return phrase, hash, nil
 }
