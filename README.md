@@ -24,21 +24,39 @@ vector store, an embeddings pipeline, auth, file storage, and LLM key
 management. onebox collapses all of that into a single binary with a clean
 admin dashboard.
 
-## Screenshots
+## Using it from your own app
+
+onebox is a plain REST API — call it with `fetch`, `requests`, `curl`, or
+the [JS/TS SDK](sdk/js) from any language or framework. Every collection
+page in the dashboard has a copy-ready **API tab** so you never have to
+guess the request shape:
+
+![Collection API tab: ready-to-copy curl and JS SDK snippets for list/create/update/delete](docs/img/dashboard-api-tab-light.png)
+
+And this is a real app — [`examples/docs-qa`](examples/docs-qa), ~150
+lines of plain HTML/JS — running against a live onebox instance: upload a
+document, ask a question in English, get an answer grounded in that
+document, with the source passage cited:
+
+![examples/docs-qa: a question answered from an uploaded document, with the source cited](docs/img/example-docs-qa-light.png)
+
+See [docs/compatibility.md](docs/compatibility.md) for the same login +
+list-records call in JavaScript, Python, and curl, and
+[`examples/`](examples) for four small apps built entirely on this API —
+including a [Chrome extension](examples/autofill-extension) that fills a
+job application from an uploaded resume:
+
+| Before | After |
+|---|---|
+| ![Empty job application form](docs/img/extension-autofill-before.png) | ![Job application form filled by the extension](docs/img/extension-autofill-after.png) |
+
+## Dashboard
 
 |  |  |
 |---|---|
 | ![Dashboard home page](docs/img/dashboard-home-light.png) | ![Dashboard home page, dark mode](docs/img/dashboard-home-dark.png) |
 | ![Account page](docs/img/dashboard-account-light.png) | ![Sign up page](docs/img/dashboard-signup-light.png) |
 | ![Emergency Kit: 12-word recovery phrase shown once at signup](docs/img/emergency-kit-light.png) | ![Sidebar for a regular user, with admin-only items shown locked rather than hidden](docs/img/sidebar-locked-light.png) |
-
-The [autofill extension example](examples/autofill-extension) filling a job
-application from a resume ingested into onebox's RAG engine — a single
-`✨ Autofill with onebox` click:
-
-| Before | After |
-|---|---|
-| ![Empty job application form](docs/img/extension-autofill-before.png) | ![Job application form filled by the extension](docs/img/extension-autofill-after.png) |
 
 ## Quickstart
 
