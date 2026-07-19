@@ -30,6 +30,7 @@ admin dashboard.
 |---|---|
 | ![Dashboard home page](docs/img/dashboard-home-light.png) | ![Dashboard home page, dark mode](docs/img/dashboard-home-dark.png) |
 | ![Account page](docs/img/dashboard-account-light.png) | ![Sign up page](docs/img/dashboard-signup-light.png) |
+| ![Emergency Kit: 12-word recovery phrase shown once at signup](docs/img/emergency-kit-light.png) | ![Sidebar for a regular user, with admin-only items shown locked rather than hidden](docs/img/sidebar-locked-light.png) |
 
 The [autofill extension example](examples/autofill-extension) filling a job
 application from a resume ingested into onebox's RAG engine — a single
@@ -57,10 +58,10 @@ for a from-scratch build of a small app on top of it.
 All 6 months of the [roadmap](ROADMAP.md) are built: core server, auth,
 dynamic collections, files, realtime, the RAG engine, the LLM gateway, an
 admin dashboard, a JS/TS SDK, example apps, and release automation
-(CI, cross-platform builds, a Dockerfile). Currently at v0.2.0 — see
-[CHANGELOG.md](CHANGELOG.md) for what's new since v0.1.0, including a
-dashboard redesign (home page, account/profile, dedicated login/signup
-pages) and DOCX ingestion.
+(CI, cross-platform builds, a Dockerfile). Currently at v0.2.1 — see
+[CHANGELOG.md](CHANGELOG.md) for the full history, including the dashboard
+redesign (home page, account/profile, dedicated login/signup pages),
+12-word recovery phrases, admin promote/demote, and DOCX ingestion.
 
 ## What's here
 

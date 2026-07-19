@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.2.1
+
+Fixes and additions from hand-testing v0.2.0's dashboard redesign, in the
+order they were reported.
+
+**Recovery phrases**
+- A 12-word recovery phrase (onebox's own embedded word list, BIP39-style
+  mechanism but not a claim of wordlist compatibility) is generated for
+  every new account, admin or user, and shown exactly once right after
+  signup in an "Emergency Kit" screen — account email, server URL, the
+  phrase, and a "Download Emergency Kit (PDF)" button (the browser's
+  native print-to-PDF, not a new dependency) — with a mandatory
+  "I've saved this" acknowledgement before continuing. Only a hash of the
+  phrase is ever stored, the same as a password.
+- The Forgot Password page now verifies email + recovery phrase and lets
+  you set a new password directly, no admin required. The admin-generated
+  reset code from v0.2.0 is kept as a secondary fallback (toggle link).
+- The Account page (both roles) can regenerate the phrase — it requires
+  the current password and immediately invalidates the old phrase.
+
+**Roles**
+- The first account created on a fresh instance is now always the admin —
+  the signup page checks the new `GET /api/setup-status` and drops the
+  confusing admin/user toggle for that case entirely.
+- Admins can promote a user to admin, or demote an admin, from a new
+  Settings → Admins panel (`POST /api/admins/promote` /
+  `POST /api/admins/demote` / `GET /api/admins`). Promotion creates a
+  separate admin login via a one-time reset code, since `_admins` and
+  `_users` are independent identity tables; demoting the last remaining
+  admin is refused.
+- `_admins` gained `first_name`, `last_name`, `phone`, `avatar_file_id`,
+  mirroring `_users` — the Account page is now a real profile editor for
+  admins too, not a read-only stub.
+- Admin-only sidebar items (Collections, Settings) are no longer hidden
+  from regular users — they show grayed out with a lock badge and explain
+  themselves via a toast on click instead of silently failing.
+
+**Fixes**
+- Profile photos now actually show up: avatars are served from an
+  authenticated endpoint, and a plain `<img src>` has no way to attach a
+  bearer token, so it silently 404'd. Avatars are now fetched once as an
+  authenticated blob and cached.
+- Login/signup errors are specific: "No account found with this email"
+  (with a Sign up link) vs "Invalid email or password" for a wrong
+  password on an account that exists. Fixed the underlying bug — the
+  dashboard treated *any* 401 as an expired session, including a plain
+  wrong-password response from the login endpoint itself, and rewrote it
+  to a confusing "session expired" message.
+- The Home page no longer shows stale stats — clicking a nav link for the
+  page you're already on didn't change the URL hash, so the router never
+  re-rendered; it now forces a refresh in that case.
+
+**Settings**
+- Provider configuration is grouped into cards (Anthropic, OpenAI-
+  compatible, Ollama, Embedding) with sensible defaults pre-filled, each
+  with a real "Test connection" button (`POST /api/settings/test-connection`)
+  that makes one minimal, non-billing request and reports success or
+  failure immediately.
+- RAG ingestion failures are now classified into plain-language causes
+  (provider unreachable, wrong URL, bad API key, timeout) instead of a
+  raw Go error string.
+
 ## v0.2.0
 
 **Dashboard**
