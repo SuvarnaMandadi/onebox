@@ -1395,7 +1395,7 @@ async function renderRecords(container, name) {
   table.appendChild(thead);
   table.appendChild(tbody);
 
-  const loadMoreBtn = actionButton("Load more", { class: "btn-secondary" }, loadPage);
+  const loadMoreBtn = actionButton("Load more", { class: "btn-secondary" }, () => loadPage(false));
   let nextCursor = "";
   let loadedAny = false;
   const tableCard = el("div", { class: "card" }, [table, loadMoreBtn]);
@@ -1410,6 +1410,14 @@ async function renderRecords(container, name) {
       else val = String(val);
       return el("td", { class: i < 2 ? "id-cell" : "", text: val });
     });
+    const editBtn = el("button", {
+      class: "btn-secondary",
+      text: "Edit",
+      onclick: async () => {
+        const updated = await showRecordEditModal(name, fields, rec);
+        if (updated) upsertRow(updated);
+      },
+    });
     const delBtn = deleteButton("Delete", "Delete this record? This cannot be undone.", async () => {
       await api("/api/collections/" + encodeURIComponent(name) + "/records/" + rec.id, { method: "DELETE" });
       row.remove();
@@ -1417,7 +1425,7 @@ async function renderRecords(container, name) {
       if (!tbody.firstChild) { tableCard.classList.add("hidden"); emptyCard.classList.remove("hidden"); }
     });
     const created = el("td", { class: "muted", text: rec.created || "" });
-    const row = el("tr", { "data-id": rec.id }, cells.concat([created, el("td", {}, delBtn)]));
+    const row = el("tr", { "data-id": rec.id }, cells.concat([created, el("td", { class: "row", style: "flex-wrap:nowrap" }, [editBtn, delBtn])]));
     return row;
   }
 
@@ -1434,17 +1442,41 @@ async function renderRecords(container, name) {
     emptyCard.classList.add("hidden");
   }
 
-  async function loadPage() {
-    const qs = new URLSearchParams({ limit: "30" });
+  // Filter/sort toolbar — exposes the list API's existing ?filter= and
+  // ?sort= query params (already supported server-side; this was simply
+  // never surfaced in the UI before).
+  const filterField = el("select", {}, [el("option", { value: "", text: "Filter by…" })].concat(fields.map((f) => el("option", { value: f.name, text: f.name }))));
+  const filterValue = el("input", { type: "text", placeholder: "value", style: "max-width:180px" });
+  const sortBtn = el("button", { class: "btn-secondary", text: "Newest first" });
+  let descending = true;
+  sortBtn.addEventListener("click", () => {
+    descending = !descending;
+    sortBtn.textContent = descending ? "Newest first" : "Oldest first";
+    loadPage(true);
+  });
+  const applyFilterBtn = actionButton("Apply", { class: "btn-secondary" }, () => loadPage(true));
+  const clearFilterBtn = el("button", {
+    class: "btn-ghost",
+    text: "Clear",
+    onclick: () => { filterField.value = ""; filterValue.value = ""; loadPage(true); },
+  });
+
+  async function loadPage(reset) {
+    if (reset) { nextCursor = ""; loadedAny = false; clear(tbody); }
+    const qs = new URLSearchParams({ limit: "30", sort: descending ? "-created" : "created" });
     if (nextCursor) qs.set("cursor", nextCursor);
+    if (filterField.value && filterValue.value) qs.set("filter", filterField.value + "=" + filterValue.value);
     const resp = await api("/api/collections/" + encodeURIComponent(name) + "/records?" + qs.toString());
     for (const rec of resp.items || []) { tbody.appendChild(renderRow(rec)); loadedAny = true; }
     nextCursor = resp.nextCursor || "";
     loadMoreBtn.style.display = nextCursor ? "" : "none";
-    if (!loadedAny) { tableCard.classList.add("hidden"); emptyCard.classList.remove("hidden"); }
+    tableCard.classList.toggle("hidden", !loadedAny);
+    emptyCard.classList.toggle("hidden", loadedAny);
   }
 
-  const recordsPane = el("div", {}, [tableCard, emptyCard, renderCreateRecordForm(name, fields, upsertRow), status]);
+  const toolbar = el("div", { class: "card row", style: "margin-bottom:12px" }, [filterField, filterValue, applyFilterBtn, clearFilterBtn, sortBtn]);
+
+  const recordsPane = el("div", {}, [toolbar, tableCard, emptyCard, renderCreateRecordForm(name, fields, upsertRow), status]);
   const apiPane = el("div", { class: "hidden" }, [renderAPISnippets(name, fields)]);
 
   const recordsTabBtn = el("button", { type: "button", class: "btn-secondary active", text: "Records" });
@@ -1550,30 +1582,59 @@ function renderAPISnippets(name, fields) {
   ]);
 }
 
+// buildFieldInputs creates one input per schema field, pre-filled from
+// initialValues if given — shared by the create form and the edit modal
+// so the two don't drift out of sync on field-type handling.
+function buildFieldInputs(fields, initialValues) {
+  return fields.map((f) => {
+    const current = initialValues ? initialValues[f.name] : undefined;
+    let input;
+    if (f.type === "bool") {
+      input = el("input", { type: "checkbox" });
+      input.checked = !!current;
+    } else if (f.type === "number") {
+      input = el("input", { type: "number", step: "any", value: current === undefined || current === null ? "" : String(current) });
+    } else if (f.type === "json") {
+      input = el("textarea", { rows: "2", placeholder: "{}", text: current === undefined || current === null ? "" : JSON.stringify(current) });
+    } else {
+      input = el("input", { type: "text", value: current === undefined || current === null ? "" : String(current) });
+    }
+    return { field: f, input };
+  });
+}
+
+// fieldInputsToBody reads buildFieldInputs' inputs back into a JSON body,
+// throwing (with the offending field named) on invalid JSON input.
+function fieldInputsToBody(inputs) {
+  const body = {};
+  for (const { field, input } of inputs) {
+    if (field.type === "bool") {
+      body[field.name] = input.checked;
+    } else if (field.type === "number") {
+      if (input.value !== "") body[field.name] = Number(input.value);
+    } else if (field.type === "json") {
+      if (input.value.trim()) {
+        try {
+          body[field.name] = JSON.parse(input.value);
+        } catch (e) {
+          throw new Error('"' + field.name + '" is not valid JSON');
+        }
+      }
+    } else if (input.value !== "") {
+      body[field.name] = input.value;
+    }
+  }
+  return body;
+}
+
 function renderCreateRecordForm(collectionName, fields, onCreated) {
   const status = el("div", { class: "error-text" });
-  const inputs = fields.map((f) => {
-    if (f.type === "bool") return { field: f, input: el("input", { type: "checkbox" }) };
-    if (f.type === "number") return { field: f, input: el("input", { type: "number", step: "any" }) };
-    if (f.type === "json") return { field: f, input: el("textarea", { rows: "2", placeholder: "{}" }) };
-    return { field: f, input: el("input", { type: "text" }) };
-  });
+  const inputs = buildFieldInputs(fields);
 
   const submitBtn = actionButton("Add record", {}, async () => {
     clear(status);
-    const body = {};
     try {
-      for (const { field, input } of inputs) {
-        if (field.type === "bool") {
-          body[field.name] = input.checked;
-        } else if (field.type === "number") {
-          if (input.value !== "") body[field.name] = Number(input.value);
-        } else if (field.type === "json") {
-          if (input.value.trim()) body[field.name] = JSON.parse(input.value);
-        } else if (input.value !== "") {
-          body[field.name] = input.value;
-        }
-      }
+      const body = fieldInputsToBody(inputs);
       const rec = await api("/api/collections/" + encodeURIComponent(collectionName) + "/records", {
         method: "POST",
         body: JSON.stringify(body),
@@ -1600,6 +1661,55 @@ function renderCreateRecordForm(collectionName, fields, onCreated) {
         .concat([submitBtn, status])
     ),
   ]);
+}
+
+// showRecordEditModal is the Record Editor: a modal (PocketBase uses a
+// side drawer for this — a centered modal reuses this dashboard's
+// existing dialog pattern instead of introducing a second one) with the
+// same field inputs as the create form, pre-filled, saving via PATCH.
+// Resolves with the updated record, or null if cancelled.
+function showRecordEditModal(collectionName, fields, record) {
+  return new Promise((resolve) => {
+    clear(modalRoot);
+    const status = el("div", { class: "error-text" });
+    const inputs = buildFieldInputs(fields, record);
+
+    function close(result) {
+      clear(modalRoot);
+      resolve(result);
+    }
+
+    const saveBtn = actionButton("Save changes", { loadingLabel: "Saving..." }, async () => {
+      clear(status);
+      try {
+        const body = fieldInputsToBody(inputs);
+        const updated = await api(
+          "/api/collections/" + encodeURIComponent(collectionName) + "/records/" + record.id,
+          { method: "PATCH", body: JSON.stringify(body) }
+        );
+        toastSuccess("Record updated");
+        close(updated);
+      } catch (e) {
+        status.textContent = e.message;
+        throw e;
+      }
+    });
+    const cancelBtn = el("button", { class: "btn-secondary", text: "Cancel", onclick: () => close(null) });
+
+    const overlay = el("div", { class: "modal-overlay", onclick: (e) => { if (e.target === overlay) close(null); } }, [
+      el("div", { class: "modal-card modal-card-wide" }, [
+        el("h3", { text: "Edit record" }),
+        el("p", { class: "muted id-cell", style: "font-size:0.8rem", text: record.id }),
+        el(
+          "div",
+          { class: "col" },
+          inputs.map(({ field, input }) => el("label", {}, [field.name + (field.required ? " *" : ""), input])).concat([status])
+        ),
+        el("div", { class: "modal-actions" }, [cancelBtn, saveBtn]),
+      ]),
+    ]);
+    modalRoot.appendChild(overlay);
+  });
 }
 
 // -- files ---------------------------------------------------------------

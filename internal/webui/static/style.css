@@ -469,7 +469,10 @@ td.id-cell, td.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace;
   max-width: 380px;
   width: 90%;
   box-shadow: var(--shadow-md);
+  max-height: 85vh;
+  overflow-y: auto;
 }
+.modal-card-wide { max-width: 520px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
 
 /* -- login -- */
