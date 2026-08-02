@@ -29,6 +29,10 @@ import (
 type providerBundle struct {
 	embedding embeddings.Provider
 	llm       *llm.Router
+	// chat is the resolved {provider, model} onebox itself uses when it
+	// has to pick a chat backend on the operator's behalf — the admin
+	// chatbot panel and /api/rag/answer. See resolveChatSelection.
+	chat chatSelection
 }
 
 // Server holds shared dependencies for HTTP handlers.
@@ -39,16 +43,29 @@ type Server struct {
 	chatCache   *chatCache
 	rateLimiter *rateLimiter
 	providers   atomic.Pointer[providerBundle]
+	// startedAt backs the AI heartbeat/metrics dashboard's uptime figure —
+	// see internal/server/metrics.go.
+	startedAt time.Time
+	// activeStreams counts SSE chat/LLM streams currently in flight
+	// (incremented at the top of streamChatReply/streamLLMChat,
+	// decremented via defer) — the only way to answer "how many streaming
+	// requests are active right now," since _logs/_usage only ever record
+	// a request after it has already finished. See metrics.go.
+	activeStreams atomic.Int64
 }
 
 // New builds a Server and its router. Provider sub-clients are left nil
 // when unconfigured (no API key), so a self-hoster who hasn't set one up
 // gets a clear per-request error instead of a broken client.
 func New(cfg config.Config, sqlDB *sql.DB) *Server {
-	s := &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub(), chatCache: newChatCache(), rateLimiter: newRateLimiter(cfg.RateLimitPerMinute)}
+	s := &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub(), chatCache: newChatCache(), rateLimiter: newRateLimiter(cfg.RateLimitPerMinute), startedAt: time.Now()}
 	if err := s.reloadProviders(context.Background()); err != nil {
 		log.Printf("load provider settings: %v (falling back to env-only config)", err)
-		s.providers.Store(&providerBundle{embedding: buildEmbeddingProvider(cfg), llm: buildLLMRouter(cfg)})
+		s.providers.Store(&providerBundle{
+			embedding: buildEmbeddingProvider(cfg),
+			llm:       buildLLMRouter(cfg),
+			chat:      resolveChatSelection(cfg, nil),
+		})
 	}
 	return s
 }
@@ -90,10 +107,17 @@ func (s *Server) reloadProviders(ctx context.Context) error {
 	if v, ok := stored[settingOllamaBaseURL]; ok {
 		effective.OllamaBaseURL = v
 	}
+	if v, ok := stored[settingChatProvider]; ok {
+		effective.ChatProvider = v
+	}
+	if v, ok := stored[settingChatModel]; ok {
+		effective.ChatModel = v
+	}
 
 	s.providers.Store(&providerBundle{
 		embedding: buildEmbeddingProvider(effective),
 		llm:       buildLLMRouter(effective),
+		chat:      resolveChatSelection(effective, stored),
 	})
 	return nil
 }
@@ -141,7 +165,14 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	// 120s (not the previous 30s): chat/RAG requests call out to an LLM
+	// provider — often a local Ollama instance running on CPU — and a
+	// cold model load or a long generation can legitimately take well
+	// over 30s without anything actually being wrong. The chatbot
+	// frontend never surfaces this value to the admin either way (see
+	// app.js's chat retry/error-hiding logic); it just gives slow-but-
+	// healthy requests enough room to finish instead of being cut off.
+	r.Use(middleware.Timeout(120 * time.Second))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   s.cfg.CORSOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
@@ -157,7 +188,10 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.requestLogger)
 		r.Get("/health", s.handleHealth)
 		r.Get("/setup-status", s.handleSetupStatus)
+		r.Post("/login", s.handleUnifiedLogin)
 		r.With(s.requireAdminAuth).Get("/logs", s.handleListLogs)
+		r.With(s.requireAdminAuth).Get("/logs/metrics", s.handleLogsMetrics)
+		r.With(s.requireAdminAuth).Get("/heartbeat", s.handleHeartbeat)
 		r.With(s.requireAdminAuth).Post("/chat", s.handleChatbot)
 		r.Post("/chat/{token}", s.handlePublicChat)
 
@@ -167,6 +201,15 @@ func (s *Server) Router() http.Handler {
 			r.Post("/enable", s.handleEnableChatShare)
 			r.Post("/disable", s.handleDisableChatShare)
 			r.Post("/regenerate", s.handleRegenerateChatShare)
+		})
+
+		// Chat attachments (multimodal chat): admin-only, same as POST
+		// /api/chat itself — see chatbotRequest.AttachmentIDs' doc comment
+		// for why this doesn't extend to the public share link.
+		r.Route("/chat-attachments", func(r chi.Router) {
+			r.Use(s.requireAdminAuth)
+			r.Post("/", s.handleUploadChatAttachment)
+			r.Delete("/{id}", s.handleDeleteChatAttachment)
 		})
 
 		r.Route("/auth", func(r chi.Router) {
@@ -238,6 +281,7 @@ func (s *Server) Router() http.Handler {
 			r.Get("/", s.handleGetSettings)
 			r.Put("/", s.handleUpdateSettings)
 			r.Post("/test-connection", s.handleTestConnection)
+			r.Get("/ollama-models", s.handleOllamaModels)
 		})
 
 		r.Route("/collections", func(r chi.Router) {
@@ -246,6 +290,7 @@ func (s *Server) Router() http.Handler {
 				r.Post("/", s.handleCreateCollection)
 				r.Get("/", s.handleListCollections)
 				r.Get("/{name}", s.handleGetCollection)
+				r.Patch("/{name}", s.handleUpdateCollectionSchema)
 				r.Delete("/{name}", s.handleDeleteCollection)
 				r.Get("/{name}/export", s.handleExportCollection)
 				r.Post("/{name}/import/preview", s.handleImportPreview)

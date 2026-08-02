@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,9 +27,48 @@ func NewAnthropicClient(baseURL, apiKey string) *AnthropicClient {
 	return &AnthropicClient{BaseURL: baseURL, APIKey: apiKey, Client: http.DefaultClient}
 }
 
+// anthropicMessage's Content is `any` because Anthropic accepts either a
+// plain string (ordinary text-only messages — the shape every message used
+// before image support existed) or a content-block array (required the
+// moment a message carries an image — a plain string can't be mixed with
+// an image block). See anthropicContent.
 type anthropicMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
+}
+
+type anthropicContentBlock struct {
+	Type   string                `json:"type"` // "text" or "image"
+	Text   string                `json:"text,omitempty"`
+	Source *anthropicImageSource `json:"source,omitempty"`
+}
+
+type anthropicImageSource struct {
+	Type      string `json:"type"` // "base64"
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+// anthropicContent renders a Message's content in Anthropic's wire shape:
+// the plain string Content itself for an ordinary text-only message (byte-
+// for-byte identical to before image support existed), or a content-block
+// array — a leading text block (if Content is non-empty) followed by one
+// base64 image block per attachment — once the message carries images.
+func anthropicContent(m Message) any {
+	if len(m.Images) == 0 {
+		return m.Content
+	}
+	blocks := make([]anthropicContentBlock, 0, len(m.Images)+1)
+	if m.Content != "" {
+		blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+	}
+	for _, img := range m.Images {
+		blocks = append(blocks, anthropicContentBlock{
+			Type:   "image",
+			Source: &anthropicImageSource{Type: "base64", MediaType: img.MediaType, Data: base64.StdEncoding.EncodeToString(img.Data)},
+		})
+	}
+	return blocks
 }
 
 type anthropicRequest struct {
@@ -37,6 +77,29 @@ type anthropicRequest struct {
 	MaxTokens int                `json:"max_tokens"`
 	Messages  []anthropicMessage `json:"messages"`
 	Stream    bool               `json:"stream,omitempty"`
+	Tools     []anthropicTool    `json:"tools,omitempty"`
+}
+
+// anthropicTool is Tool translated into Anthropic's Messages API shape —
+// see https://docs.anthropic.com/en/docs/build-with-claude/tool-use.
+// InputSchema takes the Tool's JSON Schema as-is (Anthropic's schema
+// dialect is the same draft this codebase's Tool.Schema values are
+// written in), so this is a field rename, not a translation.
+type anthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+func toAnthropicTools(tools []Tool) []anthropicTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]anthropicTool, len(tools))
+	for i, t := range tools {
+		out[i] = anthropicTool{Name: t.Name, Description: t.Description, InputSchema: t.Schema}
+	}
+	return out
 }
 
 type anthropicUsage struct {
@@ -46,8 +109,11 @@ type anthropicUsage struct {
 
 type anthropicResponse struct {
 	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type  string          `json:"type"` // "text" or "tool_use"
+		Text  string          `json:"text,omitempty"`
+		ID    string          `json:"id,omitempty"`
+		Name  string          `json:"name,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
 	} `json:"content"`
 	Usage anthropicUsage `json:"usage"`
 	Error *struct {
@@ -69,7 +135,7 @@ func splitSystem(messages []Message) (string, []anthropicMessage) {
 			system.WriteString(m.Content)
 			continue
 		}
-		rest = append(rest, anthropicMessage{Role: m.Role, Content: m.Content})
+		rest = append(rest, anthropicMessage{Role: m.Role, Content: anthropicContent(m)})
 	}
 	return system.String(), rest
 }
@@ -87,7 +153,7 @@ func (c *AnthropicClient) newRequest(ctx context.Context, body []byte) (*http.Re
 
 func (c *AnthropicClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, error) {
 	system, messages := splitSystem(req.Messages)
-	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: defaultMaxTokens, Messages: messages})
+	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: defaultMaxTokens, Messages: messages, Tools: toAnthropicTools(req.Tools)})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -115,19 +181,38 @@ func (c *AnthropicClient) Chat(ctx context.Context, req ChatRequest) (ChatResult
 	}
 
 	var text string
+	var calls []ToolCall
 	for _, block := range parsed.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			text += block.Text
+		case "tool_use":
+			calls = append(calls, ToolCall{ID: block.ID, Name: block.Name, Arguments: block.Input})
 		}
 	}
-	return ChatResult{Content: text, TokensIn: parsed.Usage.InputTokens, TokensOut: parsed.Usage.OutputTokens}, nil
+	return ChatResult{Content: text, TokensIn: parsed.Usage.InputTokens, TokensOut: parsed.Usage.OutputTokens, ToolCalls: calls}, nil
 }
 
 type anthropicStreamEvent struct {
 	Type  string `json:"type"`
+	Index int    `json:"index"`
+	// ContentBlock is only present on a content_block_start event — it
+	// announces what kind of block is starting at Index (and, for a
+	// tool_use block, the call's id/name up front; its arguments arrive
+	// afterward as a run of input_json_delta events on the same index).
+	ContentBlock struct {
+		Type string `json:"type"` // "text" or "tool_use"
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"content_block"`
 	Delta struct {
-		Type string `json:"type"`
+		Type string `json:"type"` // "text_delta" or "input_json_delta"
 		Text string `json:"text"`
+		// PartialJSON is one fragment of a tool_use block's arguments —
+		// concatenating every input_json_delta for a given Index yields
+		// that call's complete, validly-parseable JSON object exactly
+		// once content_block_stop fires for it.
+		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 	Usage   anthropicUsage `json:"usage"`
 	Message struct {
@@ -135,9 +220,23 @@ type anthropicStreamEvent struct {
 	} `json:"message"`
 }
 
+// anthropicStreamBlock tracks one in-progress content block by its stream
+// index between content_block_start and content_block_stop — Anthropic
+// interleaves blocks by index rather than sending each one as a single
+// atomic unit, so a tool call's name/id (known at content_block_start)
+// and its arguments (assembled from possibly many input_json_delta
+// fragments) have to be correlated across several events before they can
+// become one ToolCall.
+type anthropicStreamBlock struct {
+	kind  string // "text" or "tool_use"
+	id    string
+	name  string
+	input strings.Builder
+}
+
 func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest, onDelta func(string)) (ChatResult, error) {
 	system, messages := splitSystem(req.Messages)
-	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: defaultMaxTokens, Messages: messages, Stream: true})
+	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: defaultMaxTokens, Messages: messages, Stream: true, Tools: toAnthropicTools(req.Tools)})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -163,6 +262,7 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest, onDel
 	}
 
 	var result ChatResult
+	blocks := map[int]*anthropicStreamBlock{}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -174,11 +274,32 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest, onDel
 			continue
 		}
 		switch evt.Type {
+		case "content_block_start":
+			blocks[evt.Index] = &anthropicStreamBlock{kind: evt.ContentBlock.Type, id: evt.ContentBlock.ID, name: evt.ContentBlock.Name}
 		case "content_block_delta":
-			if evt.Delta.Text != "" {
-				result.Content += evt.Delta.Text
-				onDelta(evt.Delta.Text)
+			switch evt.Delta.Type {
+			case "text_delta":
+				if evt.Delta.Text != "" {
+					result.Content += evt.Delta.Text
+					onDelta(evt.Delta.Text)
+				}
+			case "input_json_delta":
+				// Never forwarded to onDelta — a tool call's arguments are
+				// structured data for ToolCalls, not chat text, and only
+				// become valid JSON once every fragment has arrived.
+				if b := blocks[evt.Index]; b != nil {
+					b.input.WriteString(evt.Delta.PartialJSON)
+				}
 			}
+		case "content_block_stop":
+			if b := blocks[evt.Index]; b != nil && b.kind == "tool_use" {
+				args := b.input.String()
+				if args == "" {
+					args = "{}"
+				}
+				result.ToolCalls = append(result.ToolCalls, ToolCall{ID: b.id, Name: b.name, Arguments: json.RawMessage(args)})
+			}
+			delete(blocks, evt.Index)
 		case "message_start":
 			result.TokensIn = evt.Message.Usage.InputTokens
 		case "message_delta":

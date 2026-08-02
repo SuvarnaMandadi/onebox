@@ -17,18 +17,24 @@ type adminAuthResponse struct {
 	RecoveryPhrase string `json:"recovery_phrase,omitempty"`
 }
 
-// handleSetupStatus is public and unauthenticated: the dashboard's signup
-// page uses it to decide whether to offer plain "Sign up" (creating a
-// regular _users account) or to bootstrap the very first admin — a fresh
-// instance's first account is always the owner/admin, so there's no
-// separate "admin signup" flow to choose once this is true.
+// handleSetupStatus is public and unauthenticated: the dashboard's auth
+// pages use it to decide what to show before anyone is signed in — the
+// dedicated superuser setup page (no admin yet), the plain login/signup
+// forms (an admin exists), and whether signup should even be offered
+// (registration_enabled, GET /api/settings itself being admin-only is
+// exactly why that flag rides along here instead).
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	count, err := countAdmins(r.Context(), s.db)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to check setup state", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"admin_exists": count > 0})
+	regEnabled, err := registrationEnabled(r.Context(), s.db, s.cfg.JWTSecret)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to check registration settings", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"admin_exists": count > 0, "registration_enabled": regEnabled})
 }
 
 // handleAdminSignup creates the first dashboard administrator. Once at

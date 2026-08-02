@@ -71,6 +71,35 @@ Then open `http://localhost:8090/_/` for the admin dashboard. See
 or [docs/tutorial-chat-with-your-docs.md](docs/tutorial-chat-with-your-docs.md)
 for a from-scratch build of a small app on top of it.
 
+## Development
+
+```bash
+go build ./... && go vet ./... && gofmt -l .
+go test ./...
+```
+
+For any browser-based UI check, use the isolated verification harness —
+**never point Claude's own Chrome-automation tool at your personal browser
+for this project**, since it drives your actual installed Chrome rather
+than a disposable instance:
+
+```bash
+go run ./cmd/onebox &                 # or: ./onebox
+cd scripts/browser-verify && npm install
+ONEBOX_VERIFY_EMAIL=you@example.com ONEBOX_VERIFY_PASSWORD=yourpassword \
+  npm run verify:auth
+```
+
+This launches Playwright's own bundled Chromium with a throwaway temp
+profile — a separate process from your real browser, closed automatically
+when the run ends — and walks a fixed checklist (login, navigation,
+collections, records, files, AI chat, attachments, proposals, no console
+errors), writing screenshots to `scripts/browser-verify/artifacts/`. See
+[ARCHITECTURE.md §15](ARCHITECTURE.md#15-browser-verification-workflow) for
+the full policy and rationale, and
+[`scripts/browser-verify/README.md`](scripts/browser-verify/README.md) for
+usage details.
+
 ## Status
 
 All 6 months of the [roadmap](ROADMAP.md) are built: core server, auth,

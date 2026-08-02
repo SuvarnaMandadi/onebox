@@ -40,14 +40,35 @@ func (f *fakeEmbeddingProvider) Embed(ctx context.Context, texts []string) ([][]
 	return out, nil
 }
 
-// fakeLLMClient implements llm.Provider without calling a real API. It's
-// installed as the router's Anthropic backend, since RAG's answer
-// endpoint defaults to cfg.AnthropicModel (routes to "anthropic").
+// fakeLLMClient implements llm.Provider without calling a real API. Tests
+// install it as whichever router backend (Anthropic, Ollama, ...) matches
+// the providerBundle.chat.Provider they configure — see newRAGTestServer,
+// which wires it in as Anthropic by default.
 type fakeLLMClient struct {
 	lastSystem, lastUser string
+	// lastMessages is the full Messages slice from the most recent call —
+	// lastSystem/lastUser above only capture the last message of each
+	// role, which loses ordering/multiplicity; tests that care about
+	// conversation history (multiple user/assistant turns in one request)
+	// read this instead.
+	lastMessages []llm.Message
+	// lastTools is the Tools slice from the most recent call — tests that
+	// care whether actionToolDefs actually reached the provider (rather
+	// than just trusting the response) read this.
+	lastTools []llm.Tool
+	// reply, if set, is returned as ChatResult.Content instead of the
+	// default "fake answer" — set by tests that need to control what the
+	// "model" said.
+	reply string
+	// toolCalls, if set, is returned as ChatResult.ToolCalls — set by
+	// tests simulating a model that called one of actionToolDefs, the
+	// same way a real provider's native tool-calling response would.
+	toolCalls []llm.ToolCall
 }
 
 func (f *fakeLLMClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResult, error) {
+	f.lastMessages = req.Messages
+	f.lastTools = req.Tools
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "system":
@@ -56,7 +77,11 @@ func (f *fakeLLMClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.Chat
 			f.lastUser = m.Content
 		}
 	}
-	return llm.ChatResult{Content: "fake answer", TokensIn: 10, TokensOut: 5}, nil
+	content := f.reply
+	if content == "" {
+		content = "fake answer"
+	}
+	return llm.ChatResult{Content: content, TokensIn: 10, TokensOut: 5, ToolCalls: f.toolCalls}, nil
 }
 
 func (f *fakeLLMClient) ChatStream(ctx context.Context, req llm.ChatRequest, onDelta func(string)) (llm.ChatResult, error) {
@@ -80,11 +105,12 @@ func newRAGTestServer(t *testing.T) (*Server, *fakeLLMClient) {
 	}
 	t.Cleanup(func() { sqlDB.Close() })
 
-	srv := New(config.Config{JWTSecret: "test-secret", FilesDir: t.TempDir(), MaxUploadSize: 1 << 20, AnthropicModel: "claude-sonnet-5"}, sqlDB)
+	srv := New(config.Config{JWTSecret: "test-secret", FilesDir: t.TempDir(), MaxUploadSize: 1 << 20}, sqlDB)
 	llmClient := &fakeLLMClient{}
 	srv.providers.Store(&providerBundle{
 		embedding: newFakeEmbeddingProvider(),
 		llm:       &llm.Router{Anthropic: llmClient},
+		chat:      chatSelection{Provider: "anthropic", Model: "claude-sonnet-5"},
 	})
 	return srv, llmClient
 }
@@ -356,18 +382,21 @@ func TestRAGAnswer(t *testing.T) {
 	}
 }
 
-// TestRAGAnswerLogsActualProvider guards against a real bug found in a
-// pre-release dry run: handleRAGAnswer hardcoded "anthropic" as the usage
-// log's provider regardless of which provider the configured model
-// actually routed to (llm.ProviderKind picks by name prefix — a non-Claude
-// AnthropicModel, e.g. an Ollama model name used for RAG answers, was
-// still logged as "anthropic", corrupting the usage/spend dashboard).
-func TestRAGAnswerLogsActualProvider(t *testing.T) {
-	srv, _ := newRAGTestServer(t)
-	srv.cfg.AnthropicModel = "llama3.2:1b" // not a "claude*" name -> routes to Ollama
+// TestRAGAnswerUsesConfiguredChatProvider is the RAG-answer half of "switching
+// Chat Provider changes the backend used": handleRAGAnswer must call
+// whichever provider bundle.chat.Provider names — via llm.Router.Named/
+// ChatWithProvider, not model-name prefix guessing (llm.ProviderKind) — and
+// log usage under that same provider. Before the Chat Provider refactor,
+// /api/rag/answer was hardcoded to cfg.AnthropicModel regardless of what
+// was actually configured; this pins the replacement behavior down at the
+// HTTP layer, complementing the llm-package-level
+// TestRouterChatWithProviderIgnoresModelPrefix.
+func TestRAGAnswerUsesConfiguredChatProvider(t *testing.T) {
+	srv, anthropicFake := newRAGTestServer(t)
 	ollamaFake := &fakeLLMClient{}
 	bundle := *srv.providers.Load()
-	bundle.llm = &llm.Router{Ollama: ollamaFake}
+	bundle.llm = &llm.Router{Anthropic: anthropicFake, Ollama: ollamaFake}
+	bundle.chat = chatSelection{Provider: "ollama", Model: "llama3.2:1b"}
 	srv.providers.Store(&bundle)
 
 	_, token := signupUser(t, srv, "researcher@example.com")
@@ -379,6 +408,13 @@ func TestRAGAnswerLogsActualProvider(t *testing.T) {
 		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
 	}
 
+	if ollamaFake.lastUser == "" {
+		t.Fatal("expected the Ollama fake to have received the request — chat_provider=ollama should route there")
+	}
+	if anthropicFake.lastUser != "" {
+		t.Fatal("Anthropic fake received a request even though chat_provider was set to ollama")
+	}
+
 	usageRec := doAuth(t, srv, http.MethodGet, "/api/usage", token, nil)
 	var usageResp struct {
 		Items []usageRecord `json:"items"`
@@ -388,8 +424,32 @@ func TestRAGAnswerLogsActualProvider(t *testing.T) {
 		t.Fatalf("got %d usage records, want 1", len(usageResp.Items))
 	}
 	if usageResp.Items[0].Provider != "ollama" {
-		t.Fatalf("usage provider = %q, want %q (model %q should route to ollama, not be hardcoded to anthropic)",
-			usageResp.Items[0].Provider, "ollama", srv.cfg.AnthropicModel)
+		t.Fatalf("usage provider = %q, want %q (chat_provider=ollama must be logged accurately, not hardcoded)",
+			usageResp.Items[0].Provider, "ollama")
+	}
+}
+
+// TestRAGAnswerNoChatModelConfigured guards the other new failure mode:
+// with no chat model chosen (the default state — chat_provider defaults
+// to "ollama" with no model until an operator picks one in Settings),
+// /api/rag/answer must fail with a clear, actionable error instead of
+// either silently calling Anthropic or panicking on an empty model string.
+func TestRAGAnswerNoChatModelConfigured(t *testing.T) {
+	srv, _ := newRAGTestServer(t)
+	bundle := *srv.providers.Load()
+	bundle.chat = chatSelection{Provider: "ollama", Model: ""}
+	srv.providers.Store(&bundle)
+
+	_, token := signupUser(t, srv, "researcher@example.com")
+	src := uploadRAGSource(t, srv, token, "notes.txt", []byte("onebox uses sqlite for storage."))
+	waitForRAGSourceDone(t, srv, token, src["id"].(string))
+
+	rec := doAuth(t, srv, http.MethodPost, "/api/rag/answer", token, ragQueryRequest{Query: "what does onebox use for storage?", TopK: 3})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Settings") {
+		t.Fatalf("expected an actionable error pointing at Settings, got %s", rec.Body.String())
 	}
 }
 

@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 )
 
 // OllamaClient calls a local Ollama daemon's /api/chat endpoint.
@@ -23,19 +26,89 @@ func NewOllamaClient(baseURL string) *OllamaClient {
 }
 
 type ollamaChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
+	Model    string          `json:"model"`
+	Messages []ollamaMessage `json:"messages"`
+	Stream   bool            `json:"stream"`
+	Tools    []ollamaTool    `json:"tools,omitempty"`
+}
+
+// ollamaTool is Tool translated into Ollama's tool-calling shape, which
+// mirrors OpenAI's (https://github.com/ollama/ollama/blob/main/docs/api.md#chat-request-with-tools)
+// field for field — a rename, not a translation, same as every other
+// provider here.
+type ollamaTool struct {
+	Type     string             `json:"type"` // always "function"
+	Function ollamaToolFunction `json:"function"`
+}
+
+type ollamaToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+func toOllamaTools(tools []Tool) []ollamaTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]ollamaTool, len(tools))
+	for i, t := range tools {
+		out[i] = ollamaTool{Type: "function", Function: ollamaToolFunction{Name: t.Name, Description: t.Description, Parameters: t.Schema}}
+	}
+	return out
+}
+
+// ollamaMessage is Ollama's wire shape for a chat message — Content plus a
+// flat sibling "images" array of raw base64 strings (no "data:" URI
+// prefix, unlike OpenAI/Anthropic). See toOllamaMessages.
+type ollamaMessage struct {
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"`
+}
+
+// toOllamaMessages converts the provider-agnostic Message list to Ollama's
+// wire shape, base64-encoding any Message.Images into the flat "images"
+// field Ollama expects alongside Content. Messages with no images marshal
+// identically to before this field existed (an omitted "images" key).
+func toOllamaMessages(messages []Message) []ollamaMessage {
+	out := make([]ollamaMessage, len(messages))
+	for i, m := range messages {
+		om := ollamaMessage{Role: m.Role, Content: m.Content}
+		for _, img := range m.Images {
+			om.Images = append(om.Images, base64.StdEncoding.EncodeToString(img.Data))
+		}
+		out[i] = om
+	}
+	return out
+}
+
+// ollamaToolCall is one entry of message.tool_calls — Arguments arrives as
+// a real JSON object on Ollama's wire (unlike OpenAI's JSON-encoded
+// string), so it maps straight onto json.RawMessage with no re-typing.
+// Ollama does mint a per-call ID (confirmed live against Ollama 0.32.1),
+// same as Anthropic/OpenAI, though its API docs don't guarantee one for
+// every model/version — ToolCall.ID is simply whatever came back, empty
+// or not.
+type ollamaToolCall struct {
+	ID       string `json:"id"`
+	Function struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"function"`
+}
+
+type ollamaResponseMessage struct {
+	Content   string           `json:"content"`
+	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
 }
 
 type ollamaChatChunk struct {
-	Message struct {
-		Content string `json:"content"`
-	} `json:"message"`
-	Done            bool   `json:"done"`
-	PromptEvalCount int    `json:"prompt_eval_count"`
-	EvalCount       int    `json:"eval_count"`
-	Error           string `json:"error"`
+	Message         ollamaResponseMessage `json:"message"`
+	Done            bool                  `json:"done"`
+	PromptEvalCount int                   `json:"prompt_eval_count"`
+	EvalCount       int                   `json:"eval_count"`
+	Error           string                `json:"error"`
 }
 
 func (c *OllamaClient) newRequest(ctx context.Context, body []byte) (*http.Request, error) {
@@ -47,8 +120,145 @@ func (c *OllamaClient) newRequest(ctx context.Context, body []byte) (*http.Reque
 	return req, nil
 }
 
+type ollamaTagsResponse struct {
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
+// ListModels reports the tags (e.g. "llama3.2:3b") of every model
+// currently pulled into this Ollama daemon, straight from its own
+// GET /api/tags — the same endpoint `ollama list` uses — so the Chat
+// Provider settings panel can offer a dropdown of what's actually
+// installed instead of a free-text field a self-hoster has to get exactly
+// right.
+func (c *OllamaClient) ListModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/tags", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama returned status %d listing models", resp.StatusCode)
+	}
+
+	var parsed ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("decode tags response: %w", err)
+	}
+	names := make([]string, len(parsed.Models))
+	for i, m := range parsed.Models {
+		names[i] = m.Name
+	}
+	return names, nil
+}
+
+// embeddingModelSubstrings are name fragments (matched against the model
+// tag, lowercased, with any ":version" suffix stripped) that identify an
+// Ollama model as embedding-only. This is a heuristic, not a registry
+// lookup — /api/tags reports names, not capabilities — but it covers every
+// embedding family onebox itself documents as an example for the Embedding
+// Provider (nomic-embed-text, bge, e5, voyage) plus the other common ones
+// (gte, minilm), so a model pulled for RAG/embeddings never shows up as a
+// choice in the Chat Provider's model dropdown. See IsEmbeddingModel.
+var embeddingModelSubstrings = []string{
+	"embed",
+	"bge",
+	"e5",
+	"gte",
+	"minilm",
+	"voyage",
+}
+
+// IsEmbeddingModel reports whether an Ollama model name looks like an
+// embedding-only model rather than a chat model. Embedding-only models are
+// never chat-capable, so this backs both ListChatModels and the settings
+// save path's validation (see validateChatModel in the server package) —
+// two independent guards against the same failure mode: a model like
+// "nomic-embed-text" ending up selected as the dashboard's own chat model.
+func IsEmbeddingModel(name string) bool {
+	base := strings.ToLower(name)
+	if i := strings.Index(base, ":"); i >= 0 {
+		base = base[:i]
+	}
+	for _, frag := range embeddingModelSubstrings {
+		if strings.Contains(base, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// ListChatModels is ListModels filtered down to models not recognized as
+// embedding-only (see IsEmbeddingModel) — what the Chat Provider settings
+// panel's Ollama dropdown should actually offer. Embedding-only models are
+// never removed from Ollama itself or from the Embedding Provider's own
+// model field; filtering only ever affects what's offered for chat.
+func (c *OllamaClient) ListChatModels(ctx context.Context) ([]string, error) {
+	all, err := c.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	chatModels := make([]string, 0, len(all))
+	for _, m := range all {
+		if !IsEmbeddingModel(m) {
+			chatModels = append(chatModels, m)
+		}
+	}
+	return chatModels, nil
+}
+
+type ollamaVersionResponse struct {
+	Version string `json:"version"`
+}
+
+// Version reports the running Ollama daemon's version string via its
+// GET /api/version endpoint, so the dashboard can show what's actually
+// installed rather than assuming a version.
+func (c *OllamaClient) Version(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/version", nil)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("get version: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama returned status %d fetching version", resp.StatusCode)
+	}
+
+	var parsed ollamaVersionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", fmt.Errorf("decode version response: %w", err)
+	}
+	return parsed.Version, nil
+}
+
+// toOllamaToolCalls converts Ollama's own tool_calls shape to the
+// provider-agnostic ToolCall — shared by Chat (a single response) and
+// ChatStream (Ollama sends each streamed tool call whole, in one chunk,
+// never fragmented across several the way OpenAI/Anthropic do, so there's
+// no accumulation to do — just this same conversion, called once).
+func toOllamaToolCalls(calls []ollamaToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, len(calls))
+	for i, c := range calls {
+		out[i] = ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: c.Function.Arguments}
+	}
+	return out
+}
+
 func (c *OllamaClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, error) {
-	body, err := json.Marshal(ollamaChatRequest{Model: req.Model, Messages: req.Messages, Stream: false})
+	buildStart := time.Now()
+	body, err := json.Marshal(ollamaChatRequest{Model: req.Model, Messages: toOllamaMessages(req.Messages), Stream: false, Tools: toOllamaTools(req.Tools)})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -57,8 +267,17 @@ func (c *OllamaClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, e
 	if err != nil {
 		return ChatResult{}, err
 	}
+	requestBuild := time.Since(buildStart)
 
+	// sendStart is the "request sent" instant both TimeToFirstByte and
+	// TotalDuration are measured from. Do() blocks until the response
+	// headers arrive — with stream:false, Ollama holds the connection open
+	// and writes nothing until generation is fully done, so on this
+	// provider ttfb effectively equals network + prompt-eval + generation
+	// time combined, not just network time. See ChatTiming's doc comment.
+	sendStart := time.Now()
 	resp, err := c.Client.Do(httpReq)
+	ttfb := time.Since(sendStart)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("chat request: %w", err)
 	}
@@ -68,6 +287,7 @@ func (c *OllamaClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, e
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return ChatResult{}, fmt.Errorf("decode response: %w", err)
 	}
+	total := time.Since(sendStart)
 	if resp.StatusCode != http.StatusOK {
 		if parsed.Error != "" {
 			return ChatResult{}, fmt.Errorf("ollama error: %s", parsed.Error)
@@ -79,11 +299,17 @@ func (c *OllamaClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, e
 		Content:   parsed.Message.Content,
 		TokensIn:  parsed.PromptEvalCount,
 		TokensOut: parsed.EvalCount,
+		ToolCalls: toOllamaToolCalls(parsed.Message.ToolCalls),
+		Timing: ChatTiming{
+			RequestBuild:    requestBuild,
+			TimeToFirstByte: ttfb,
+			TotalDuration:   total,
+		},
 	}, nil
 }
 
 func (c *OllamaClient) ChatStream(ctx context.Context, req ChatRequest, onDelta func(string)) (ChatResult, error) {
-	body, err := json.Marshal(ollamaChatRequest{Model: req.Model, Messages: req.Messages, Stream: true})
+	body, err := json.Marshal(ollamaChatRequest{Model: req.Model, Messages: toOllamaMessages(req.Messages), Stream: true, Tools: toOllamaTools(req.Tools)})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -123,6 +349,9 @@ func (c *OllamaClient) ChatStream(ctx context.Context, req ChatRequest, onDelta 
 		if chunk.Message.Content != "" {
 			result.Content += chunk.Message.Content
 			onDelta(chunk.Message.Content)
+		}
+		if len(chunk.Message.ToolCalls) > 0 {
+			result.ToolCalls = append(result.ToolCalls, toOllamaToolCalls(chunk.Message.ToolCalls)...)
 		}
 		if chunk.Done {
 			result.TokensIn = chunk.PromptEvalCount

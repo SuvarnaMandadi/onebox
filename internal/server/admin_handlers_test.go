@@ -147,6 +147,58 @@ func assertErrorCode(t *testing.T, rec *httptest.ResponseRecorder, wantStatus in
 	}
 }
 
+// TestSuperuserHasAdminPrivileges verifies the token issued at admin
+// bootstrap actually passes requireAdminAuth on an admin-only endpoint —
+// distinct from TestAdminSignup, which only checks the signup response
+// itself, not that the resulting session can do admin things.
+func TestSuperuserHasAdminPrivileges(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token := bootstrapAdmin(t, srv)
+
+	rec := doAuth(t, srv, http.MethodGet, "/api/collections", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin-only endpoint status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestNormalUserCannotAccessAdminEndpoints and
+// TestUserLoginDoesNotGrantAdminAccess cover the flip side: a regular
+// _users session — even a freshly logged-in one — must never pass
+// requireAdminAuth. Users and admins are separate concepts end to end:
+// separate tables (_users vs _admins), separate signup/login endpoints,
+// separate JWT subject types (auth.SubjectUser vs auth.SubjectAdmin), and
+// a _users session must never satisfy an admin-only route.
+func TestNormalUserCannotAccessAdminEndpoints(t *testing.T) {
+	srv, _ := newTestServer(t)
+	bootstrapAdmin(t, srv) // an admin must exist for the instance to be usable at all
+	_, userToken := signupUser(t, srv, "user@example.com")
+
+	rec := doAuth(t, srv, http.MethodGet, "/api/collections", userToken, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUserLoginDoesNotGrantAdminAccess(t *testing.T) {
+	srv, _ := newTestServer(t)
+	bootstrapAdmin(t, srv)
+	signupUser(t, srv, "user@example.com")
+
+	loginRec := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "user@example.com", Password: "hunter22222"})
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("user login status = %d, want 200, body = %s", loginRec.Code, loginRec.Body.String())
+	}
+	var resp authResponse
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+
+	rec := doAuth(t, srv, http.MethodGet, "/api/collections", resp.Token, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for a user token on an admin endpoint, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSetupStatus(t *testing.T) {
 	srv, _ := newTestServer(t)
 

@@ -33,8 +33,9 @@ type Config struct {
 	EmbeddingAPIKey   string
 	EmbeddingModel    string
 
-	// AnthropicAPIKey backs the Anthropic branch of the LLM gateway (and
-	// is what /api/rag/answer uses by default, via AnthropicModel).
+	// AnthropicAPIKey backs the Anthropic branch of the LLM gateway. Used
+	// whenever a caller (directly, or the dashboard's Chat Provider) picks
+	// an Anthropic/Claude model.
 	AnthropicAPIKey string
 	AnthropicModel  string
 
@@ -48,6 +49,21 @@ type Config struct {
 	// reused for embeddings when EmbeddingProvider is "ollama" — it's the
 	// same local daemon either way.
 	OllamaBaseURL string
+
+	// ChatProvider and ChatModel select which backend the dashboard's own
+	// chat surfaces — the admin chatbot panel and /api/rag/answer — use.
+	// This is completely independent of EmbeddingProvider (RAG ingestion
+	// keeps working on whatever embedding backend is configured no matter
+	// what ChatProvider is set to) and independent of the per-request
+	// model routing POST /api/llm/chat still does for direct API callers
+	// (see llm.ProviderKind) — those are unchanged.
+	//
+	// One of "ollama" (default — no key required, works out of the box
+	// for a local install), "anthropic", or "openai". Overridable at
+	// runtime via the chat_provider/chat_model settings, which take
+	// precedence over these env-var defaults; see reloadProviders.
+	ChatProvider string
+	ChatModel    string
 
 	// RateLimitPerMinute caps chat requests per user per minute.
 	RateLimitPerMinute int
@@ -102,6 +118,9 @@ func Load() Config {
 		OpenAIChatBaseURL: os.Getenv("ONEBOX_OPENAI_BASE_URL"),
 
 		OllamaBaseURL: getEnv("ONEBOX_OLLAMA_BASE_URL", "http://localhost:11434"),
+
+		ChatProvider: getEnv("ONEBOX_CHAT_PROVIDER", "ollama"),
+		ChatModel:    os.Getenv("ONEBOX_CHAT_MODEL"),
 
 		RateLimitPerMinute: getEnvInt("ONEBOX_RATE_LIMIT_PER_MINUTE", 20),
 		MonthlySpendCapUSD: getEnvFloat("ONEBOX_MONTHLY_SPEND_CAP_USD", 5.0),

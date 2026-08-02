@@ -1,0 +1,16 @@
+{
+  "name": "onebox-browser-verify",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated Playwright-based UI smoke check for onebox. Launches Playwright's own bundled Chromium with a throwaway temp profile — never your installed/personal Chrome browser.",
+  "type": "module",
+  "scripts": {
+    "verify": "node verify.mjs",
+    "verify:headless": "node verify.mjs --headless",
+    "verify:auth": "node verify.mjs --require-auth",
+    "verify:headed": "node verify.mjs --headed"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

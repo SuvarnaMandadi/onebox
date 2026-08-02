@@ -54,6 +54,29 @@ func (s *Server) handleGetCollection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
+type updateCollectionSchemaRequest struct {
+	Fields []Field `json:"fields"`
+}
+
+func (s *Server) handleUpdateCollectionSchema(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	var req updateCollectionSchemaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON", nil)
+		return
+	}
+
+	c, err := updateCollectionSchema(r.Context(), s.db, name, Schema{Fields: req.Fields})
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, c)
+	case err == errCollectionNotFound:
+		writeError(w, http.StatusNotFound, "not_found", "collection not found", nil)
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_schema", err.Error(), nil)
+	}
+}
+
 func (s *Server) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	err := deleteCollection(r.Context(), s.db, name)

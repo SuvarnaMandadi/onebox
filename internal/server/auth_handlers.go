@@ -29,6 +29,16 @@ type authResponse struct {
 const minPasswordLen = 8
 
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
+	enabled, err := registrationEnabled(r.Context(), s.db, s.cfg.JWTSecret)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to check registration settings", nil)
+		return
+	}
+	if !enabled {
+		writeError(w, http.StatusForbidden, "registration_disabled", "New user registration is currently disabled.", nil)
+		return
+	}
+
 	var req authRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON", nil)

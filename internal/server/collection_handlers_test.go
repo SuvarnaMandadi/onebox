@@ -161,6 +161,77 @@ func TestCreateCollectionDuplicateName(t *testing.T) {
 	}
 }
 
+func TestUpdateCollectionSchema(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token := bootstrapAdmin(t, srv)
+
+	create := doAuth(t, srv, http.MethodPost, "/api/collections", token, createCollectionRequest{
+		Name: "posts",
+		Schema: Schema{Fields: []Field{
+			{Name: "title", Type: FieldText, Required: true},
+			{Name: "views", Type: FieldNumber},
+		}},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create failed: status = %d, body = %s", create.Code, create.Body.String())
+	}
+
+	rec1 := doAuth(t, srv, http.MethodPost, "/api/collections/posts/records", token, map[string]any{"title": "hello", "views": 3})
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("create record failed: status = %d, body = %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Rename "title" -> "headline", drop "views", add "published" (bool).
+	update := doAuth(t, srv, http.MethodPatch, "/api/collections/posts", token, updateCollectionSchemaRequest{
+		Fields: []Field{
+			{Name: "headline", Type: FieldText, Required: true, RenameFrom: "title"},
+			{Name: "published", Type: FieldBool},
+		},
+	})
+	if update.Code != http.StatusOK {
+		t.Fatalf("update schema failed: status = %d, body = %s", update.Code, update.Body.String())
+	}
+	var updated collection
+	if err := json.Unmarshal(update.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode updated collection: %v", err)
+	}
+	if len(updated.Schema.Fields) != 2 || updated.Schema.Fields[0].Name != "headline" || updated.Schema.Fields[0].RenameFrom != "" {
+		t.Fatalf("unexpected schema after update: %+v", updated.Schema.Fields)
+	}
+
+	// Existing data should have survived the rename under the new field name.
+	list := doAuth(t, srv, http.MethodGet, "/api/collections/posts/records", token, nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list records failed: status = %d, body = %s", list.Code, list.Body.String())
+	}
+	var listResp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode records: %v", err)
+	}
+	if len(listResp.Items) != 1 || listResp.Items[0]["headline"] != "hello" {
+		t.Fatalf("expected renamed field to carry data over, got %+v", listResp.Items)
+	}
+	if _, stillHasViews := listResp.Items[0]["views"]; stillHasViews {
+		t.Fatalf("dropped field %q should not appear in record output: %+v", "views", listResp.Items[0])
+	}
+
+	notFound := doAuth(t, srv, http.MethodPatch, "/api/collections/nope", token, updateCollectionSchemaRequest{
+		Fields: []Field{{Name: "x", Type: FieldText}},
+	})
+	if notFound.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body = %s", notFound.Code, notFound.Body.String())
+	}
+
+	rejectsNoAuth := doAuth(t, srv, http.MethodPatch, "/api/collections/posts", "", updateCollectionSchemaRequest{
+		Fields: []Field{{Name: "x", Type: FieldText}},
+	})
+	if rejectsNoAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401, body = %s", rejectsNoAuth.Code, rejectsNoAuth.Body.String())
+	}
+}
+
 func TestGetAndDeleteCollection(t *testing.T) {
 	srv, _ := newTestServer(t)
 	token := bootstrapAdmin(t, srv)

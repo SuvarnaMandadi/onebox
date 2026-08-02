@@ -96,6 +96,99 @@ func createCollection(ctx context.Context, sqlDB *sql.DB, name string, schema Sc
 	return getCollectionByName(ctx, sqlDB, name)
 }
 
+// updateCollectionSchema replaces a collection's field list, rebuilding the
+// underlying table so renames/type-changes/reorders/removals all take
+// effect immediately: SQLite can ADD/RENAME/DROP columns individually but
+// has no ALTER COLUMN TYPE, so one full rebuild (new table, copy data with
+// a best-effort CAST, swap) handles every kind of change uniformly instead
+// of five different code paths. Data for a removed field is lost; data for
+// a type change is carried over via SQLite's permissive CAST (e.g.
+// non-numeric text becomes 0, not an error) — the caller is expected to
+// warn about both before calling this. That warning belongs at the UI
+// layer, not the API contract: an API client scripting a schema migration
+// directly should not be blocked by a confirmation dialog.
+func updateCollectionSchema(ctx context.Context, sqlDB *sql.DB, name string, newSchema Schema) (*collection, error) {
+	if err := ValidateSchema(newSchema); err != nil {
+		return nil, err
+	}
+
+	existing, err := getCollectionByName(ctx, sqlDB, name)
+	if err != nil {
+		return nil, err
+	}
+	oldByName := make(map[string]Field, len(existing.Schema.Fields))
+	for _, f := range existing.Schema.Fields {
+		oldByName[f.Name] = f
+	}
+
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	tmpName := name + "__rebuild_tmp"
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q RENAME TO %q", name, tmpName)); err != nil {
+		return nil, fmt.Errorf("rename old table: %w", err)
+	}
+
+	// persisted drops RenameFrom (a request-only hint) before this schema
+	// is written to _collections or used to build the new table.
+	persisted := Schema{Fields: make([]Field, len(newSchema.Fields))}
+	insertCols := []string{"id", "owner_id", "created", "updated"}
+	selectExprs := []string{"id", "owner_id", "created", "updated"}
+
+	for i, f := range newSchema.Fields {
+		persisted.Fields[i] = Field{Name: f.Name, Type: f.Type, Required: f.Required}
+
+		source := f.Name
+		if f.RenameFrom != "" {
+			source = f.RenameFrom
+		}
+		old, existed := oldByName[source]
+		insertCols = append(insertCols, fmt.Sprintf("%q", f.Name))
+		switch {
+		case !existed:
+			selectExprs = append(selectExprs, "NULL")
+		case old.Type == f.Type:
+			selectExprs = append(selectExprs, fmt.Sprintf("%q", source))
+		default:
+			selectExprs = append(selectExprs, fmt.Sprintf("CAST(%q AS %s)", source, f.Type.sqliteType()))
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, createTableSQL(name, persisted)); err != nil {
+		return nil, fmt.Errorf("create rebuilt table: %w", err)
+	}
+
+	copySQL := fmt.Sprintf("INSERT INTO %q (%s) SELECT %s FROM %q",
+		name, strings.Join(insertCols, ", "), strings.Join(selectExprs, ", "), tmpName)
+	if _, err := tx.ExecContext(ctx, copySQL); err != nil {
+		return nil, fmt.Errorf("copy data into rebuilt table: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE %q", tmpName)); err != nil {
+		return nil, fmt.Errorf("drop old table: %w", err)
+	}
+
+	schemaJSON, err := json.Marshal(persisted)
+	if err != nil {
+		return nil, fmt.Errorf("marshal schema: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE _collections SET schema_json = ?, updated = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?`,
+		string(schemaJSON), name,
+	); err != nil {
+		return nil, fmt.Errorf("update collection registry: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	return getCollectionByName(ctx, sqlDB, name)
+}
+
 func fillDefaultRules(rules Rules) Rules {
 	def := DefaultRules()
 	if rules.List == "" {

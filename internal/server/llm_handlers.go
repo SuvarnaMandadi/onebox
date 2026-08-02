@@ -77,6 +77,8 @@ func (s *Server) streamLLMChat(w http.ResponseWriter, r *http.Request, req llm.C
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server does not support streaming", nil)
 		return
 	}
+	s.activeStreams.Add(1)
+	defer s.activeStreams.Add(-1)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

@@ -43,6 +43,11 @@ type Field struct {
 	Name     string    `json:"name"`
 	Type     FieldType `json:"type"`
 	Required bool      `json:"required"`
+	// RenameFrom, only meaningful on a schema-update request (never
+	// persisted — updateCollectionSchema strips it before saving), tells
+	// the rebuild which existing column's data to carry into this field.
+	// Omitted (or equal to Name) means "same field, no rename."
+	RenameFrom string `json:"rename_from,omitempty"`
 }
 
 // Schema is the JSON-defined shape of a collection's user fields.

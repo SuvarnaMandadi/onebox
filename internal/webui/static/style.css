@@ -146,6 +146,63 @@ body {
 }
 
 h1, h2, h3 { line-height: 1.25; margin: 0 0 var(--space-4); }
+
+/* -- page header (title + primary action, every top-level page) -- */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-5);
+}
+.page-header-title { display: flex; align-items: center; gap: var(--space-2); margin: 0; }
+.page-header-icon { flex-shrink: 0; color: var(--accent); }
+.page-header-actions:empty { display: none; }
+.card-title { display: flex; align-items: center; gap: var(--space-2); }
+.card-title-icon { flex-shrink: 0; color: var(--accent); }
+
+.bulk-bar {
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-3);
+  align-items: center;
+}
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  text-align: center;
+  padding: var(--space-6) var(--space-4);
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+.dropzone-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.upload-progress {
+  width: 100%;
+  max-width: 320px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.upload-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent-gradient);
+  transition: width 0.15s ease;
+}
+.file-preview-slot { display: flex; justify-content: center; margin-bottom: var(--space-3); }
+.file-preview-lg { max-width: 100%; max-height: 320px; border-radius: var(--radius-md); object-fit: contain; }
+
 h2 { font-size: 1.4rem; font-weight: 650; }
 h3 { font-size: 1.05rem; font-weight: 650; }
 p { margin: 0 0 var(--space-3); }
@@ -211,7 +268,8 @@ p { margin: 0 0 var(--space-3); }
   gap: var(--space-2);
   transition: background-color 0.12s ease, color 0.12s ease;
 }
-.nav-icon { font-size: 0.95em; line-height: 1; }
+.nav-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; }
+.nav-icon .icon { display: block; }
 #sidebar nav a:hover { background: var(--surface-2); color: var(--text-primary); }
 #sidebar nav a.active { background: var(--accent); color: var(--accent-contrast); }
 #sidebar nav a.locked {
@@ -368,7 +426,6 @@ a:focus-visible, .back-link:focus-visible,
 .muted { color: var(--text-muted); }
 .error-text { color: var(--danger); font-size: 0.9rem; }
 .success-text { color: var(--success-text); font-size: 0.9rem; }
-.provider-card h3 { display: flex; align-items: center; gap: var(--space-2); }
 .back-link { color: var(--accent); text-decoration: none; font-size: 0.92rem; font-weight: 700; display: inline-block; margin-bottom: var(--space-3); }
 .back-link:hover { color: var(--accent-strong); text-decoration: underline; }
 
@@ -385,7 +442,7 @@ td.id-cell, td.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace;
   padding: var(--space-8) var(--space-5);
   color: var(--text-muted);
 }
-.empty-state .empty-icon { font-size: 2rem; margin-bottom: var(--space-3); opacity: 0.6; }
+.empty-state .empty-icon { display: inline-block; margin-bottom: var(--space-3); opacity: 0.55; }
 .empty-state .empty-hint { font-size: 0.88rem; max-width: 40ch; margin: var(--space-2) auto 0; }
 
 /* -- status badges -- */
@@ -403,6 +460,19 @@ td.id-cell, td.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace;
 .badge-processing { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 .badge-done     { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success-text); }
 .badge-error    { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+.badge-warning  { background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); }
+
+/* -- Logs page: monitoring dashboard + AI heartbeat panel (renderLogs, app.js) -- */
+.logs-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.heartbeat-list { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.heartbeat-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.heartbeat-row-label { font-weight: 600; min-width: 140px; }
+.heartbeat-row-detail { font-size: 0.82rem; }
 
 /* -- spinner -- */
 
@@ -479,6 +549,8 @@ td.id-cell, td.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace;
 
 .login-card { width: 100%; max-width: 360px; }
 .field-row { display: grid; grid-template-columns: 1fr 110px 90px 32px; gap: var(--space-2); margin-bottom: var(--space-2); align-items: center; }
+.field-row-edit { grid-template-columns: 1fr 110px 90px 28px 28px 28px; }
+.field-row-edit button { padding: 0.35rem 0.4rem; justify-content: center; }
 
 /* -- chart (usage page) -- see dataviz skill mark specs */
 .viz-root {
@@ -494,6 +566,29 @@ td.id-cell, td.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace;
 .chart-grid-line { stroke: var(--chart-grid); stroke-width: 1; }
 .chart-bar { fill: var(--chart-bar); }
 .chart-bar:hover { filter: brightness(1.15); }
+
+/* -- lineChart (app.js) — time-series graphs on the Logs dashboard -- */
+.chart-wrap { position: relative; }
+.chart-line { stroke: var(--chart-bar); stroke-width: 2; }
+.chart-area { fill: var(--chart-bar); opacity: 0.12; stroke: none; }
+.chart-line-end { fill: var(--chart-bar); }
+.chart-crosshair { stroke: var(--chart-axis); stroke-width: 1; stroke-dasharray: 2 2; }
+.chart-hover-dot { fill: var(--chart-surface); stroke: var(--chart-bar); stroke-width: 2; }
+.chart-crosshair.hidden, .chart-hover-dot.hidden, .chart-tooltip.hidden { display: none; }
+.chart-hover-overlay { fill: transparent; cursor: crosshair; }
+.chart-tooltip {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--shadow-sm);
+}
 
 code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.85em; }
 .api-snippet {
@@ -659,6 +754,17 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
 }
 .password-toggle:hover { background: transparent; filter: none; color: var(--text-primary); }
 
+.password-strength { display: flex; align-items: center; gap: var(--space-2); margin-top: -0.4rem; }
+.strength-bar { display: flex; gap: 3px; flex: 1; }
+.strength-seg { height: 4px; flex: 1; border-radius: 2px; background: var(--border-strong); transition: background-color 0.15s ease; }
+.strength-seg.strength-1 { background: #d9534f; }
+.strength-seg.strength-2 { background: #f0ad4e; }
+.strength-seg.strength-3 { background: #5bc0de; }
+.strength-seg.strength-4 { background: #3fa34d; }
+.strength-label { font-size: 0.76rem; color: var(--text-muted); min-width: 68px; text-align: right; flex-shrink: 0; }
+
+.auth-row-between { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; margin-top: -0.35rem; }
+.remember-me { display: flex; flex-direction: row; align-items: center; gap: var(--space-1); font-size: 0.85rem; color: var(--text-secondary); }
 .auth-links { text-align: right; font-size: 0.85rem; margin-top: -0.35rem; }
 .auth-links a { color: var(--accent); text-decoration: none; }
 .auth-links a:hover { text-decoration: underline; }
@@ -683,6 +789,15 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
   cursor: pointer;
 }
 .link-btn:hover:not(:disabled) { color: var(--text-primary); filter: none; background: transparent; }
+
+.icon-btn {
+  background: transparent;
+  border: none;
+  padding: var(--space-1);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+}
+.icon-btn:hover:not(:disabled) { color: var(--text-primary); filter: none; background: var(--surface-2); }
 
 .field-error {
   color: var(--danger);
@@ -797,7 +912,11 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
   #app { padding: var(--space-4); max-width: 100%; }
   .card table { display: block; overflow-x: auto; white-space: nowrap; }
   .recovery-grid { grid-template-columns: repeat(2, 1fr); }
-  .chatbot-panel { width: calc(100vw - 2 * var(--space-4)); }
+  .chatbot-panel.state-normal, .chatbot-panel.state-minimized { width: calc(100vw - 2 * var(--space-4)); }
+  .chatbot-panel.state-maximized { width: calc(100vw - 2 * var(--space-4)); left: var(--space-4); }
+  .chatbot-history { width: 150px; }
+  .field-row { display: flex; flex-wrap: wrap; }
+  .field-row > input[type="text"] { flex: 1 1 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -830,13 +949,15 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
   align-items: center;
   justify-content: center;
 }
+
+/* Base panel: layout/chrome shared by every size state. Actual dimensions
+   are set per-state below (and, for the normal state, overridden inline by
+   JS from the localStorage-persisted size — see initChatbot/applySizeState
+   in app.js). */
 .chatbot-panel {
   position: fixed;
   bottom: calc(var(--space-6) + 64px);
   right: var(--space-6);
-  width: 340px;
-  max-width: calc(100vw - 2 * var(--space-4));
-  max-height: 480px;
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -846,6 +967,31 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
   z-index: 500;
   overflow: hidden;
 }
+.chatbot-panel.state-normal {
+  width: 420px;
+  height: 620px;
+  max-width: calc(100vw - 2 * var(--space-4));
+  max-height: calc(100vh - 2 * var(--space-4));
+  min-width: 320px;
+  min-height: 360px;
+  resize: both;
+}
+.chatbot-panel.state-maximized {
+  top: 6vh;
+  left: calc(50vw - 35vw);
+  bottom: auto;
+  right: auto;
+  width: 70vw;
+  height: 70vh;
+  max-width: calc(100vw - 2 * var(--space-4));
+  max-height: calc(100vh - 2 * var(--space-4));
+}
+.chatbot-panel.state-minimized {
+  width: 320px;
+  height: auto;
+}
+.chatbot-panel.state-minimized .chatbot-body { display: none; }
+
 .chatbot-panel-header {
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
@@ -853,17 +999,607 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
+.chatbot-panel.state-maximized .chatbot-panel-header { cursor: move; }
+.chatbot-panel-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chatbot-panel-actions { display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; }
+
+.chatbot-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.chatbot-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* -- conversation history side-panel -- */
+.chatbot-history {
+  width: 200px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--surface-2);
+}
+.chatbot-history.hidden { display: none; }
+.chatbot-history-header {
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.chatbot-history-list { overflow-y: auto; flex: 1; }
+.chatbot-history-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.chatbot-history-item:hover { background: var(--surface-1); }
+.chatbot-history-item.active { background: var(--surface-1); box-shadow: inset 3px 0 0 var(--accent); }
+.chatbot-history-item-title { font-size: 0.82rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chatbot-history-item-time { font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; }
+
 .chatbot-log {
   flex: 1;
   overflow-y: auto;
+  scroll-behavior: smooth;
   padding: var(--space-3) var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
   font-size: 0.88rem;
+  min-height: 0;
 }
-.chatbot-msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-contrast); border-radius: var(--radius-md); padding: 0.4rem 0.7rem; max-width: 85%; }
-.chatbot-msg.assistant { align-self: flex-start; background: var(--surface-2); border-radius: var(--radius-md); padding: 0.4rem 0.7rem; max-width: 85%; white-space: pre-wrap; }
-.chatbot-form { display: flex; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--border); }
-.chatbot-form input { flex: 1; }
+.chatbot-empty { color: var(--text-muted); font-size: 0.85rem; text-align: center; margin: auto; padding: var(--space-4); }
+
+@keyframes chatbot-msg-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.chatbot-msg { display: flex; flex-direction: column; max-width: 88%; gap: 2px; animation: chatbot-msg-in 0.18s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .chatbot-msg { animation: none; }
+}
+/* Blinking "still generating" cursor appended at the end of a streaming
+   reply's text (see updateMessageContent's opts.streaming, app.js) — the
+   same affordance ChatGPT/Claude use so a long pause mid-reply doesn't
+   read as the UI having stalled. */
+.chatbot-stream-cursor {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 1px;
+  background: currentColor;
+  vertical-align: text-bottom;
+  animation: chatbot-cursor-blink 1s step-end infinite;
+}
+@keyframes chatbot-cursor-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chatbot-stream-cursor { animation: none; opacity: 0.6; }
+}
+.chatbot-msg.user { align-self: flex-end; align-items: flex-end; }
+.chatbot-msg.assistant { align-self: flex-start; align-items: flex-start; }
+.chatbot-bubble-content {
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chatbot-msg.user .chatbot-bubble-content { background: var(--accent); color: var(--accent-contrast); }
+.chatbot-msg.assistant .chatbot-bubble-content { background: var(--surface-2); }
+/* A reply that resolved to pure proposal/action content (no prose at all —
+   see runTurn/buildMessageNode) has nothing to show in the text bubble
+   itself; an empty rounded box above the action card reads as a bug, so
+   collapse it instead of rendering a visible blank. */
+.chatbot-bubble-content:empty { display: none; }
+.chatbot-bubble-content > *:first-child { margin-top: 0; }
+.chatbot-bubble-content > *:last-child { margin-bottom: 0; }
+.chatbot-bubble-content p { margin: 0.4em 0; }
+.chatbot-bubble-content ul, .chatbot-bubble-content ol { margin: 0.4em 0; padding-left: 1.3em; }
+.chatbot-bubble-content h2, .chatbot-bubble-content h3, .chatbot-bubble-content h4 { margin: 0.5em 0 0.3em; font-size: 1em; }
+.chatbot-msg-time { font-size: 0.68rem; color: var(--text-muted); padding: 0 0.2rem; }
+
+/* -- failed/interrupted turns (see runTurn's catch block, app.js) — a
+   failure must always be visible in the transcript itself, never just a
+   toast that can be missed or fades before it's read. -- */
+.chatbot-bubble-content.chatbot-bubble-error {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--danger-strong);
+}
+.chatbot-error-row { display: flex; align-items: flex-start; gap: 0.4rem; }
+.chatbot-error-icon { flex: none; line-height: 1.3; }
+.chatbot-msg-retry-btn {
+  align-self: flex-start;
+  background: none;
+  border: 1px solid var(--danger);
+  color: var(--danger-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.chatbot-msg-retry-btn:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.chatbot-msg-incomplete-note {
+  align-self: flex-start;
+  font-size: 0.72rem;
+  color: var(--danger-strong);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 0.2rem;
+}
+
+.chatbot-inline-code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.3em;
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chatbot-msg.user .chatbot-inline-code { background: rgba(255, 255, 255, 0.18); border-color: transparent; }
+
+.code-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin: 0.4em 0;
+  background: var(--surface-1);
+}
+.code-block-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.72rem;
+}
+.code-lang { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.code-copy-btn:hover { background: var(--border); color: var(--text-primary); }
+.code-block pre {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Lightweight syntax-highlighting tokens (see highlightInto in app.js) —
+   deliberately reuses the app's existing semantic color tokens instead of
+   a separate highlighting palette, so a code block stays visually
+   consistent with the rest of the theme in both light and dark mode. */
+.tok-kw  { color: var(--accent); font-weight: 600; }
+.tok-str { color: var(--success-text); }
+.tok-num { color: var(--warning); }
+.tok-com { color: var(--text-muted); font-style: italic; }
+
+/* -- GFM tables in chat replies (renderMarkdown's table branch, app.js) -- */
+.chatbot-table-wrap {
+  overflow-x: auto;
+  margin: 0.4em 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.chatbot-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.chatbot-table th, .chatbot-table td {
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.chatbot-table th { background: var(--surface-2); font-weight: 600; }
+.chatbot-table tbody tr:last-child td { border-bottom: none; }
+.chatbot-table tbody tr:hover { background: var(--surface-2); }
+
+/* -- "Thinking…" typing indicator -- */
+.chatbot-typing .chatbot-bubble-content { display: none; }
+.chatbot-typing.hidden { display: none; }
+.chatbot-typing { flex-direction: row; align-items: center; gap: 4px; align-self: flex-start; padding: 0.5rem 0.75rem; }
+.chatbot-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: chatbot-bounce 1.1s infinite ease-in-out both;
+}
+.chatbot-dot:nth-child(1) { animation-delay: -0.28s; }
+.chatbot-dot:nth-child(2) { animation-delay: -0.14s; }
+@keyframes chatbot-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* -- Proposal Cards (see renderActionCard in app.js / proposedAction in
+   chatbot_context.go) — validated, structured proposals below an
+   assistant message ("Proposal" is the user-facing term; class names
+   below stay "action" internally to avoid renaming churn). No execution
+   exists yet: the control at the bottom of every card is permanently
+   disabled and reads "Waiting for approval." -- */
+.chatbot-actions-container:empty { display: none; }
+.chatbot-action-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  margin: 0.4em 0;
+  background: var(--surface-1);
+}
+.chatbot-action-card.destructive { border-color: var(--danger); }
+.chatbot-proposal-eyebrow {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.chatbot-action-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-1); }
+.chatbot-action-title { font-size: 0.85rem; font-weight: 600; }
+.chatbot-action-destructive-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--danger-strong);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+.chatbot-action-desc { font-size: 0.85rem; margin-bottom: var(--space-2); color: var(--text-secondary); }
+.chatbot-action-collection-name { font-size: 0.85rem; font-weight: 600; margin-bottom: var(--space-1); }
+.chatbot-action-fields-label { font-size: 0.75rem; color: var(--text-muted); margin-top: var(--space-1); }
+.chatbot-action-fields-list { margin: var(--space-1) 0 var(--space-2); padding-left: 1.1em; font-size: 0.82rem; }
+.chatbot-action-fields-list li { color: var(--text-secondary); }
+.chatbot-action-buttons { display: flex; gap: var(--space-2); }
+.chatbot-action-buttons button {
+  font-size: 0.78rem;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.chatbot-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.chatbot-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+/* Positioning anchor for .mention-popup, which floats directly above the
+   input row (see the "@/# mention autocomplete" section of app.js). */
+.chatbot-composer-wrap { position: relative; }
+.mention-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + var(--space-1));
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+}
+.mention-popup.hidden { display: none; }
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.mention-item-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 0.85rem; }
+.mention-item-kind { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.02em; color: var(--text-muted); }
+.mention-item.active, .mention-item:hover { background: var(--surface-2); }
+.chatbot-form textarea {
+  flex: 1;
+  resize: none;
+  max-height: calc(20px * 8 + 16px);
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+.chatbot-send { flex-shrink: 0; }
+.chatbot-send.sending { opacity: 0.7; cursor: default; }
+.chatbot-attach-btn { flex-shrink: 0; margin-bottom: 1px; }
+
+/* -- "+" attachment menu (ChatGPT-style — see the composer section of
+   initChatbot in app.js): a small fixed-width popup anchored above the
+   "+" button, left-aligned rather than stretching the full composer width
+   like .mention-popup does. -- */
+.chatbot-plus-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--space-1));
+  width: 190px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+  padding: 0.3rem;
+}
+.chatbot-plus-menu.hidden { display: none; }
+.chatbot-plus-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.chatbot-plus-menu-item:hover:not(:disabled) { background: var(--surface-2); }
+.chatbot-plus-menu-item:disabled { color: var(--text-muted); cursor: default; }
+.chatbot-plus-menu-badge {
+  margin-left: auto;
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+
+/* -- chat attachments: composer row, chips, drop overlay (see the
+   "attachments" section of initChatbot in app.js) -- */
+.chatbot-attachments-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.chatbot-attachments-row.hidden { display: none; }
+
+.attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 220px;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  position: relative;
+}
+.attachment-chip.error { border-color: var(--danger); }
+/* Context chips (AI Workspace, M2 — collection/record/conversation
+   references, as opposed to a file attachment) reuse the exact same chip
+   layout; only the icon reads as "referenced data" rather than "file"
+   via the accent tint below, so the two read as related but distinct at
+   a glance. */
+.context-chip .attachment-chip-icon { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--surface-1)); }
+.attachment-chip-icon, .attachment-chip-thumb {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: var(--surface-1);
+  object-fit: cover;
+}
+.attachment-chip-meta { min-width: 0; flex: 1; }
+.attachment-chip-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip-status { font-size: 0.68rem; color: var(--text-muted); }
+.attachment-chip.error .attachment-chip-status { color: var(--danger); }
+.attachment-chip-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  overflow: hidden;
+}
+.attachment-chip-progress-bar { height: 100%; background: var(--accent); transition: width 0.15s ease; }
+.attachment-chip-remove {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface-1);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.attachment-chip-remove:hover { background: var(--border); color: var(--text-primary); }
+
+/* Attachment chips on an already-sent message — smaller, no remove button,
+   sits above the message bubble (see buildMessageNode in app.js). */
+.chatbot-msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  max-width: 100%;
+}
+.chatbot-msg-attachments .attachment-chip { max-width: 180px; padding: 0.2rem 0.4rem; }
+.chatbot-msg-attachments .attachment-image-tile { max-width: 120px; max-height: 120px; }
+
+/* Image attachments render as a real inline photo tile, not a filename
+   chip — the way ChatGPT/Claude/Copilot show an attached image — see
+   attachmentImageTileNode in app.js. Documents keep the chip above. */
+.attachment-image-tile {
+  position: relative;
+  display: inline-block;
+  width: fit-content;
+  max-width: 160px;
+  max-height: 160px;
+  /* A source image smaller than this (a 1x1 tracking-pixel-sized upload
+     is a real, if rare, case) would otherwise let width:fit-content
+     shrink the tile down toward the image's own tiny intrinsic size —
+     and since the remove button is positioned absolutely inside an
+     overflow:hidden tile, it would then render almost entirely clipped
+     outside those bounds, making it impossible to click. The min size
+     keeps every tile (and its remove button) usable regardless of the
+     source image's real dimensions; object-fit: cover on the <img> below
+     already handles filling that space for any size of source image. */
+  min-width: 56px;
+  min-height: 56px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  cursor: zoom-in;
+  line-height: 0;
+  background: var(--surface-2);
+}
+.attachment-image-tile.error { border-color: var(--danger); }
+.attachment-image-tile-img { display: block; width: 100%; height: 100%; max-width: 160px; max-height: 160px; object-fit: cover; }
+.attachment-image-tile-progress {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.attachment-image-tile-progress-bar { height: 100%; background: var(--accent); transition: width 0.15s ease; }
+.attachment-image-tile-error-label {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 0.65rem;
+  text-align: center;
+  padding: 2px 0;
+}
+.attachment-image-tile-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(11, 11, 11, 0.6);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.attachment-image-tile-remove:hover { background: rgba(11, 11, 11, 0.85); }
+
+/* Click-to-enlarge lightbox for an image attachment — shares
+   .modal-overlay/modalA11y with every other dialog (see
+   openImageLightbox in app.js); only the inner content is bespoke, since
+   an image viewer has no card chrome. */
+.lightbox-content { position: relative; max-width: 92vw; max-height: 92vh; line-height: 0; }
+.lightbox-image {
+  display: block;
+  max-width: 92vw;
+  max-height: 92vh;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.lightbox-close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-md);
+}
+.lightbox-close:hover { background: var(--surface-2); }
+
+.chatbot-drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  background: color-mix(in srgb, var(--surface-1) 88%, transparent);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.9rem;
+  pointer-events: none;
+  z-index: 10;
+}
+.chatbot-drop-overlay.hidden { display: none; }
+
+/* -- toast retry action button (see toast()'s opts.action in app.js) -- */
+.toast { display: flex; align-items: center; gap: var(--space-3); }
+.toast-action {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: inherit;
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.toast-action:hover { background: rgba(255, 255, 255, 0.28); }

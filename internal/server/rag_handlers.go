@@ -270,8 +270,15 @@ func (s *Server) handleRAGAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.providers.Load().llm.Chat(r.Context(), llm.ChatRequest{
-		Model: s.cfg.AnthropicModel,
+	bundle := s.providers.Load()
+	chat := bundle.chat
+	if chat.Model == "" {
+		writeError(w, http.StatusServiceUnavailable, "no_chat_model", "no chat model chosen — pick one for your Chat Provider in Settings", nil)
+		return
+	}
+
+	result, err := bundle.llm.ChatWithProvider(r.Context(), chat.Provider, llm.ChatRequest{
+		Model: chat.Model,
 		Messages: []llm.Message{
 			{Role: "system", Content: ragSystemPrompt},
 			{Role: "user", Content: buildRAGPrompt(req.Query, chunks)},
@@ -281,7 +288,7 @@ func (s *Server) handleRAGAnswer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "LLM call failed: "+err.Error(), nil)
 		return
 	}
-	s.logUsage(r.Context(), llm.ProviderKind(s.cfg.AnthropicModel), s.cfg.AnthropicModel, result.TokensIn, result.TokensOut, false)
+	s.logUsage(r.Context(), chat.Provider, chat.Model, result.TokensIn, result.TokensOut, false)
 
 	writeJSON(w, http.StatusOK, ragAnswerResponse{Answer: result.Content, Sources: chunks})
 }
