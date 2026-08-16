@@ -18,6 +18,7 @@ import (
 	"onebox/internal/embeddings"
 	"onebox/internal/llm"
 	"onebox/internal/webui"
+	webuiapp "onebox/internal/webui/app"
 )
 
 // providerBundle groups the embedding/LLM clients built from the
@@ -199,6 +200,9 @@ func (s *Server) Router() http.Handler {
 	}))
 
 	r.Mount("/_/", http.StripPrefix("/_/", webui.Handler()))
+	// /app/ is the React dashboard — mounted at its own prefix so both can
+	// run side by side until /_/ is retired (see ARCHITECTURE.md).
+	r.Mount("/app/", http.StripPrefix("/app", webuiapp.Handler()))
 	r.Get("/chat/{token}", handlePublicChatPage)
 
 	r.Route("/api", func(r chi.Router) {
