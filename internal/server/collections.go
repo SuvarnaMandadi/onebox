@@ -44,10 +44,18 @@ var (
 // createCollection validates name/schema/rules, then atomically creates the
 // dynamic table and registers it in _collections.
 func createCollection(ctx context.Context, sqlDB *sql.DB, name string, schema Schema, rules Rules) (*collection, error) {
+	// "Customer Details" -> "customer_details" (RC2) — a name a human
+	// would naturally type is turned into a legal identifier here, once,
+	// rather than requiring every caller (dashboard, AI tool call) to
+	// pre-clean it themselves. A name that's already legal is untouched.
+	name = SlugifyCollectionName(name)
 	if err := ValidateCollectionName(name); err != nil {
 		return nil, err
 	}
 	if err := ValidateSchema(schema); err != nil {
+		return nil, err
+	}
+	if err := validateRelationTargets(ctx, sqlDB, schema); err != nil {
 		return nil, err
 	}
 	if err := ValidateRules(rules); err != nil {
@@ -111,6 +119,9 @@ func updateCollectionSchema(ctx context.Context, sqlDB *sql.DB, name string, new
 	if err := ValidateSchema(newSchema); err != nil {
 		return nil, err
 	}
+	if err := validateRelationTargets(ctx, sqlDB, newSchema); err != nil {
+		return nil, err
+	}
 
 	existing, err := getCollectionByName(ctx, sqlDB, name)
 	if err != nil {
@@ -139,7 +150,17 @@ func updateCollectionSchema(ctx context.Context, sqlDB *sql.DB, name string, new
 	selectExprs := []string{"id", "owner_id", "created", "updated"}
 
 	for i, f := range newSchema.Fields {
-		persisted.Fields[i] = Field{Name: f.Name, Type: f.Type, Required: f.Required}
+		// RC4 bug fix: this used to copy only Name/Type/Required, silently
+		// dropping RelationCollection and Validation from EVERY field on
+		// EVERY schema update (not just the one being changed) — a relation
+		// field survived exactly one add-field/edit-schema round before its
+		// relation_collection (and any field's validation rules) vanished
+		// from what actually got persisted, even though the request that
+		// triggered the rebuild had submitted the full, correct field data
+		// and validateRelationTargets above had validated against it. Only
+		// RenameFrom is deliberately request-only and excluded here — see
+		// this field's own doc comment (collection_schema.go).
+		persisted.Fields[i] = Field{Name: f.Name, Type: f.Type, Required: f.Required, RelationCollection: f.RelationCollection, Validation: f.Validation}
 
 		source := f.Name
 		if f.RenameFrom != "" {
@@ -187,6 +208,43 @@ func updateCollectionSchema(ctx context.Context, sqlDB *sql.DB, name string, new
 	}
 
 	return getCollectionByName(ctx, sqlDB, name)
+}
+
+// validateRelationTargets checks that every relation field in schema names
+// a collection that actually exists — the data-layer half of relation
+// validation (ValidateSchema, collection_schema.go, already checked the
+// structural half: relation_collection is set and syntactically a legal
+// name). Reuses getCollectionByName, the same lookup every other
+// existence check in this file already goes through — no parallel
+// "does this collection exist" query. Called by both createCollection and
+// updateCollectionSchema before either touches the database, so a schema
+// naming a nonexistent (or misspelled) target collection is rejected up
+// front rather than silently accepted and only failing later at record
+// time (see validateRelationValues, records.go, for that record-level
+// counterpart).
+//
+// A collection referencing itself (a self-relation, e.g. an "employees"
+// collection with a manager_id field pointing back at "employees") is
+// legal here by construction: updateCollectionSchema's existing lookup
+// finds the collection because it already exists by the time a schema
+// update runs. createCollection has no such case to handle specially
+// either — a brand-new collection can't self-reference on its very first
+// schema (the collection doesn't exist yet to be found), so that request
+// is correctly rejected the same way any other nonexistent target would
+// be; a self-relation can always be added afterwards via update_schema.
+func validateRelationTargets(ctx context.Context, sqlDB *sql.DB, schema Schema) error {
+	for _, f := range schema.Fields {
+		if f.Type != FieldRelation {
+			continue
+		}
+		if _, err := getCollectionByName(ctx, sqlDB, f.RelationCollection); err != nil {
+			if err == errCollectionNotFound {
+				return fmt.Errorf("field %q relates to collection %q, which does not exist", f.Name, f.RelationCollection)
+			}
+			return fmt.Errorf("checking relation target %q for field %q: %w", f.RelationCollection, f.Name, err)
+		}
+	}
+	return nil
 }
 
 func fillDefaultRules(rules Rules) Rules {

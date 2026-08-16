@@ -86,6 +86,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// No-op when ONEBOX_BACKUP_INTERVAL_HOURS is unset (see
+	// StartBackupScheduler's own doc comment) — stops automatically when
+	// ctx is cancelled by the same shutdown signal the HTTP server below
+	// listens for.
+	srv.StartBackupScheduler(ctx)
+
 	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("onebox listening on %s (data dir: %s)", cfg.Addr, cfg.DataDir)

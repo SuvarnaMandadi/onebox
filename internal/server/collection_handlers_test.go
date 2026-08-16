@@ -145,6 +145,56 @@ func TestCreateCollection(t *testing.T) {
 	}
 }
 
+// TestSlugifyCollectionName is the pure-function pin for RC2's "allow
+// spaces in collection names" fix — a human-typed name is turned into a
+// legal internal identifier rather than rejected outright.
+func TestSlugifyCollectionName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Customer Details", "customer_details"},
+		{"  leading and trailing  ", "leading_and_trailing"},
+		{"Multi   Space", "multi_space"},
+		{"Weird!!Punctuation??", "weird_punctuation"},
+		{"posts", "posts"},             // already legal — untouched, case preserved
+		{"Posts", "Posts"},             // already legal (nameRE allows mixed case) — untouched
+		{"2024 Report", "2024 Report"}, // digit-led even after slugifying — can't be fixed, left as-is
+		{"_users", "_users"},           // would slugify to "users", laundering a reserved name — refused
+		{"_Users!!", "_Users!!"},       // same, case/punctuation variant — still refused
+	}
+	for _, tc := range cases {
+		if got := SlugifyCollectionName(tc.in); got != tc.want {
+			t.Errorf("SlugifyCollectionName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestCreateCollectionAllowsSpacesInName is the end-to-end pin: a request
+// naming a collection "Customer Details" must succeed and register a
+// collection actually named "customer_details" — not reject the request,
+// and not silently keep the raw, SQL-identifier-illegal name.
+func TestCreateCollectionAllowsSpacesInName(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token := bootstrapAdmin(t, srv)
+	body := createCollectionRequest{Name: "Customer Details", Schema: Schema{Fields: []Field{{Name: "email", Type: FieldText}}}}
+
+	rec := doAuth(t, srv, http.MethodPost, "/api/collections", token, body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+	var c collection
+	if err := json.Unmarshal(rec.Body.Bytes(), &c); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if c.Name != "customer_details" {
+		t.Fatalf("collection Name = %q, want %q", c.Name, "customer_details")
+	}
+
+	// And it's genuinely usable under that name — not just returned once.
+	get := doAuth(t, srv, http.MethodGet, "/api/collections/customer_details", token, nil)
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET /api/collections/customer_details: status = %d, body = %s", get.Code, get.Body.String())
+	}
+}
+
 func TestCreateCollectionDuplicateName(t *testing.T) {
 	srv, _ := newTestServer(t)
 	token := bootstrapAdmin(t, srv)
@@ -259,5 +309,169 @@ func TestGetAndDeleteCollection(t *testing.T) {
 	getAfterDelete := doAuth(t, srv, http.MethodGet, "/api/collections/posts", token, nil)
 	if getAfterDelete.Code != http.StatusNotFound {
 		t.Fatalf("get after delete status = %d, want 404", getAfterDelete.Code)
+	}
+}
+
+// TestCreateCollectionWithRelationField is the Milestone 6 happy-path pin:
+// a relation field whose target collection already exists is accepted, and
+// the persisted schema carries relation_collection back out.
+func TestCreateCollectionWithRelationField(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token := bootstrapAdmin(t, srv)
+
+	create := doAuth(t, srv, http.MethodPost, "/api/collections", token, createCollectionRequest{
+		Name:   "customers",
+		Schema: Schema{Fields: []Field{{Name: "name", Type: FieldText, Required: true}}},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create customers failed: status = %d, body = %s", create.Code, create.Body.String())
+	}
+
+	ordersReq := createCollectionRequest{
+		Name: "orders",
+		Schema: Schema{Fields: []Field{
+			{Name: "total", Type: FieldNumber, Required: true},
+			{Name: "customer_id", Type: FieldRelation, RelationCollection: "customers"},
+		}},
+	}
+	orders := doAuth(t, srv, http.MethodPost, "/api/collections", token, ordersReq)
+	if orders.Code != http.StatusCreated {
+		t.Fatalf("create orders failed: status = %d, body = %s", orders.Code, orders.Body.String())
+	}
+	var c collection
+	if err := json.Unmarshal(orders.Body.Bytes(), &c); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var relField *Field
+	for i, f := range c.Schema.Fields {
+		if f.Name == "customer_id" {
+			relField = &c.Schema.Fields[i]
+		}
+	}
+	if relField == nil || relField.Type != FieldRelation || relField.RelationCollection != "customers" {
+		t.Fatalf("expected a persisted relation field pointing at customers, got %+v", c.Schema.Fields)
+	}
+}
+
+// TestCreateCollectionRelationTargetMustExist confirms a relation field
+// naming a nonexistent collection is rejected at creation time (schema-
+// level validation, validateRelationTargets in collections.go) rather than
+// silently accepted and only failing later at record-write time.
+func TestCreateCollectionRelationTargetMustExist(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token := bootstrapAdmin(t, srv)
+
+	rec := doAuth(t, srv, http.MethodPost, "/api/collections", token, createCollectionRequest{
+		Name: "orders",
+		Schema: Schema{Fields: []Field{
+			{Name: "customer_id", Type: FieldRelation, RelationCollection: "ghost"},
+		}},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUpdateCollectionSchemaAddsRelationField confirms a relation field can
+// be added to an existing collection via update_schema (PATCH), and that a
+// self-relation (target = the collection being updated) is legal — see
+// validateRelationTargets' doc comment for why self-relations only work at
+// update time, never at initial creation.
+func TestUpdateCollectionSchemaAddsRelationField(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token := bootstrapAdmin(t, srv)
+
+	create := doAuth(t, srv, http.MethodPost, "/api/collections", token, createCollectionRequest{
+		Name:   "employees",
+		Schema: Schema{Fields: []Field{{Name: "name", Type: FieldText, Required: true}}},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create failed: status = %d, body = %s", create.Code, create.Body.String())
+	}
+
+	update := doAuth(t, srv, http.MethodPatch, "/api/collections/employees", token, updateCollectionSchemaRequest{
+		Fields: []Field{
+			{Name: "name", Type: FieldText, Required: true},
+			{Name: "manager_id", Type: FieldRelation, RelationCollection: "employees"},
+		},
+	})
+	if update.Code != http.StatusOK {
+		t.Fatalf("update failed: status = %d, body = %s", update.Code, update.Body.String())
+	}
+
+	// RC4 regression: updateCollectionSchema used to persist only
+	// Name/Type/Required, silently dropping RelationCollection (and
+	// Validation, see TestUpdateCollectionSchemaPreservesValidation below)
+	// from the schema actually written to _collections — the request above
+	// would return 200 even while corrupting relation_id into a dangling,
+	// unlinked "relation" field. Re-fetching (rather than trusting the PATCH
+	// response body) proves it round-trips through a real read, not just
+	// whatever the handler happened to echo back.
+	var updated collection
+	if err := json.Unmarshal(update.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode updated collection: %v", err)
+	}
+	if len(updated.Schema.Fields) != 2 || updated.Schema.Fields[1].RelationCollection != "employees" {
+		t.Fatalf("expected manager_id.relation_collection = %q to survive the update, got %+v", "employees", updated.Schema.Fields)
+	}
+
+	refetch := doAuth(t, srv, http.MethodGet, "/api/collections/employees", token, nil)
+	if refetch.Code != http.StatusOK {
+		t.Fatalf("refetch failed: status = %d, body = %s", refetch.Code, refetch.Body.String())
+	}
+	var reread collection
+	if err := json.Unmarshal(refetch.Body.Bytes(), &reread); err != nil {
+		t.Fatalf("decode refetched collection: %v", err)
+	}
+	if len(reread.Schema.Fields) != 2 || reread.Schema.Fields[1].RelationCollection != "employees" {
+		t.Fatalf("expected manager_id.relation_collection = %q to still be persisted on refetch, got %+v", "employees", reread.Schema.Fields)
+	}
+}
+
+// TestUpdateCollectionSchemaPreservesValidation is the Validation half of
+// the same RC4 regression as TestUpdateCollectionSchemaAddsRelationField
+// above: a field's validation rules (unique/format/length/pattern/range)
+// must survive a schema update untouched, including for a field that
+// already existed before the update and isn't even the one being changed.
+func TestUpdateCollectionSchemaPreservesValidation(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token := bootstrapAdmin(t, srv)
+
+	create := doAuth(t, srv, http.MethodPost, "/api/collections", token, createCollectionRequest{
+		Name: "customers",
+		Schema: Schema{Fields: []Field{
+			{Name: "email", Type: FieldText, Validation: &FieldValidation{Format: "email", Unique: true}},
+		}},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create failed: status = %d, body = %s", create.Code, create.Body.String())
+	}
+
+	// Add an unrelated field — email's own validation wasn't part of this
+	// request at all, so it must still survive the rebuild untouched.
+	update := doAuth(t, srv, http.MethodPatch, "/api/collections/customers", token, updateCollectionSchemaRequest{
+		Fields: []Field{
+			{Name: "email", Type: FieldText, Validation: &FieldValidation{Format: "email", Unique: true}},
+			{Name: "phone", Type: FieldText, Validation: &FieldValidation{MinLength: intPtr(7)}},
+		},
+	})
+	if update.Code != http.StatusOK {
+		t.Fatalf("update failed: status = %d, body = %s", update.Code, update.Body.String())
+	}
+
+	refetch := doAuth(t, srv, http.MethodGet, "/api/collections/customers", token, nil)
+	var reread collection
+	if err := json.Unmarshal(refetch.Body.Bytes(), &reread); err != nil {
+		t.Fatalf("decode refetched collection: %v", err)
+	}
+	if len(reread.Schema.Fields) != 2 {
+		t.Fatalf("expected 2 fields, got %+v", reread.Schema.Fields)
+	}
+	email, phone := reread.Schema.Fields[0], reread.Schema.Fields[1]
+	if email.Validation == nil || email.Validation.Format != "email" || !email.Validation.Unique {
+		t.Fatalf("expected email's validation to survive the update, got %+v", email.Validation)
+	}
+	if phone.Validation == nil || phone.Validation.MinLength == nil || *phone.Validation.MinLength != 7 {
+		t.Fatalf("expected phone's validation to persist, got %+v", phone.Validation)
 	}
 }

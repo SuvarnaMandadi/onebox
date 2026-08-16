@@ -127,6 +127,24 @@ func TestDescribeConversationExcerptsTruncates(t *testing.T) {
 	}
 }
 
+// TestDescribeConversationExcerptsCapsAtMax is Fix 10's count-cap pin for
+// conversation_excerpts — the counterpart of TestDescribeContextRefsCapsAtMax
+// (maxContextRefs) and TestResolveAttachmentsCapsAtMax
+// (maxAttachmentsPerMessage): a request listing more than
+// maxConversationExcerptsPerMessage excerpts must only have that many
+// actually injected into the prompt.
+func TestDescribeConversationExcerptsCapsAtMax(t *testing.T) {
+	var excerpts []conversationExcerptInput
+	for i := 0; i < maxConversationExcerptsPerMessage+5; i++ {
+		excerpts = append(excerpts, conversationExcerptInput{Title: "conversation", Text: "some content"})
+	}
+	got := describeConversationExcerpts(excerpts)
+	count := strings.Count(got, "--- Referenced conversation")
+	if count != maxConversationExcerptsPerMessage {
+		t.Fatalf("described %d excerpt(s), want capped at %d", count, maxConversationExcerptsPerMessage)
+	}
+}
+
 // TestResolveAttachmentsFallsBackForFileWithoutChatAttachmentRow is the
 // regression pin for M2's "reference an existing file" feature: a file
 // uploaded through the ordinary Files browser (POST /api/files), never
@@ -160,6 +178,38 @@ func TestResolveAttachmentsFallsBackForFileWithoutChatAttachmentRow(t *testing.T
 	}
 	if !strings.Contains(resolved.DocsText, "referenced.txt") {
 		t.Fatalf("filename label missing from DocsText: %q", resolved.DocsText)
+	}
+}
+
+// TestResolveAttachmentsCapsAtMax is the server-side-cap regression test
+// (security-audit Fix 10): before this cap existed, nothing stopped a
+// crafted request from listing hundreds of attachment_ids, each costing a
+// DB lookup plus up to maxAttachmentTextChars of injected prompt text —
+// client-side self-limiting (the dashboard's own composer UI) doesn't
+// count, per this file's own "never trust the client" philosophy (see
+// maxContextRefs' doc comment, applied identically here). Mirrors
+// TestDescribeContextRefsCapsAtMax.
+func TestResolveAttachmentsCapsAtMax(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+	adminToken := bootstrapAdmin(t, srv)
+
+	var ids []string
+	for i := 0; i < maxAttachmentsPerMessage+5; i++ {
+		uploadReq := multipartUploadRequest(t, "/api/files", "file", "note.txt", []byte("content"))
+		uploadReq.Header.Set("Authorization", "Bearer "+adminToken)
+		uploadRec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(uploadRec, uploadReq)
+		if uploadRec.Code != http.StatusCreated {
+			t.Fatalf("upload %d failed: status = %d, body = %s", i, uploadRec.Code, uploadRec.Body.String())
+		}
+		var fr fileRecord
+		mustUnmarshal(t, uploadRec.Body.Bytes(), &fr)
+		ids = append(ids, fr.ID)
+	}
+
+	resolved := srv.resolveAttachments(t.Context(), ids, false)
+	if len(resolved.Refs) != maxAttachmentsPerMessage {
+		t.Fatalf("resolved %d attachment(s), want capped at %d", len(resolved.Refs), maxAttachmentsPerMessage)
 	}
 }
 
@@ -217,7 +267,16 @@ func TestChatbotConversationExcerptsReachTheModel(t *testing.T) {
 // TestChatbotContextRefsAndAttachmentsAndProposalsCoexist is the M1/M2
 // regression guard: context refs, a real attachment, and a proposal-
 // producing tool call must all work together in one turn without
-// interfering — this milestone must not regress the previous ones.
+// interfering — this milestone must not regress the previous ones. Uses a
+// destructive action (delete_collection) rather than create_collection
+// deliberately: as of the AI-execution milestone
+// (chatbot_tool_execution.go), a safe action like create_collection
+// auto-executes and triggers a second tool-execution-loop round, which
+// would replace fake.lastMessages with that later round's messages (no
+// Images/context-ref text on it) before this test ever gets to inspect
+// it. A destructive action never auto-executes (see autoExecutable), so
+// the turn stays a single round and fake.lastMessages is still round 1's
+// — the one everything actually rode in on.
 func TestChatbotContextRefsAndAttachmentsAndProposalsCoexist(t *testing.T) {
 	srv, adminToken := newChatAttachmentTestServer(t)
 	seedCollection(t, srv.db, "orders", Field{Name: "total", Type: FieldNumber})
@@ -225,7 +284,7 @@ func TestChatbotContextRefsAndAttachmentsAndProposalsCoexist(t *testing.T) {
 
 	fake := &fakeLLMClient{
 		reply:     "Here's what I found.",
-		toolCalls: []llm.ToolCall{toolCall(actionCreateCollection, map[string]any{"name": "notes", "fields": []map[string]any{{"name": "body", "type": "text"}}})},
+		toolCalls: []llm.ToolCall{toolCall(actionDeleteCollection, map[string]any{"name": "orders"})},
 	}
 	bundle := *srv.providers.Load()
 	bundle.llm = &llm.Router{Anthropic: fake}

@@ -175,6 +175,14 @@ func (s *Server) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_record", err.Error(), nil)
 		return
 	}
+	if err := validateRelationValues(r.Context(), s.db, c, input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_record", err.Error(), nil)
+		return
+	}
+	if err := validateUniqueFields(r.Context(), s.db, c, "", input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_record", err.Error(), nil)
+		return
+	}
 
 	ownerID, _ := authUserID(r.Context())
 
@@ -233,6 +241,14 @@ func (s *Server) handleUpdateRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateRecordInput(input, c.Schema, false); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_record", err.Error(), nil)
+		return
+	}
+	if err := validateRelationValues(r.Context(), s.db, c, input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_record", err.Error(), nil)
+		return
+	}
+	if err := validateUniqueFields(r.Context(), s.db, c, id, input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_record", err.Error(), nil)
 		return
 	}

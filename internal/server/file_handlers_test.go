@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"onebox/internal/config"
@@ -193,6 +194,94 @@ func TestServeAndDeleteFile(t *testing.T) {
 		getRec := doAuth(t, srv, http.MethodGet, "/api/files/"+uploaded.ID, ownerToken, nil)
 		if getRec.Code != http.StatusNotFound {
 			t.Fatalf("get after delete status = %d, want 404", getRec.Code)
+		}
+	})
+}
+
+// TestServeFileAlwaysSetsNoSniff pins the blanket half of Fix 5 (security
+// audit): every served file, regardless of MIME type, must carry
+// X-Content-Type-Options: nosniff so a browser trusts the declared
+// Content-Type instead of re-sniffing the body itself.
+func TestServeFileAlwaysSetsNoSniff(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+	_, token := signupUser(t, srv, "uploader@example.com")
+
+	uploadReq := multipartUploadRequest(t, "/api/files", "file", "plain.txt", []byte("just plain text"))
+	uploadReq.Header.Set("Authorization", "Bearer "+token)
+	uploadRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusCreated {
+		t.Fatalf("upload failed: status = %d, body = %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploaded fileRecord
+	json.Unmarshal(uploadRec.Body.Bytes(), &uploaded)
+
+	rec := doAuth(t, srv, http.MethodGet, "/api/files/"+uploaded.ID, token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+}
+
+// TestServeFileForcesDownloadForBrowserExecutableTypes is the stored-XSS
+// regression test (security-audit Fix 5): a malicious .html upload, opened
+// later via its /api/files/{id} URL, used to execute in this API's own
+// origin — Content-Type was set straight from the upload-time
+// http.DetectContentType classification with no protection at all. It must
+// now be forced to application/octet-stream with a Content-Disposition:
+// attachment header so a browser downloads rather than renders it. A
+// harmless plain-text upload is the control case, proving normal files are
+// unaffected — still served inline as their real type.
+func TestServeFileForcesDownloadForBrowserExecutableTypes(t *testing.T) {
+	srv := newTestServerWithFiles(t)
+	_, token := signupUser(t, srv, "uploader@example.com")
+
+	upload := func(filename string, content []byte) fileRecord {
+		t.Helper()
+		req := multipartUploadRequest(t, "/api/files", "file", filename, content)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("upload %s failed: status = %d, body = %s", filename, rec.Code, rec.Body.String())
+		}
+		var fr fileRecord
+		json.Unmarshal(rec.Body.Bytes(), &fr)
+		return fr
+	}
+
+	t.Run("html upload is forced to download", func(t *testing.T) {
+		malicious := upload("evil.html", []byte("<!DOCTYPE html><html><body><script>alert(document.cookie)</script></body></html>"))
+		if malicious.Mime != "text/html; charset=utf-8" {
+			t.Fatalf("precondition: uploaded Mime = %q, want a text/html classification (test assumes http.DetectContentType's exact output)", malicious.Mime)
+		}
+
+		rec := doAuth(t, srv, http.MethodGet, "/api/files/"+malicious.ID, token, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+			t.Fatalf("Content-Type = %q, want %q (must never be served as renderable HTML)", got, "application/octet-stream")
+		}
+		if disp := rec.Header().Get("Content-Disposition"); disp == "" || !strings.Contains(disp, "attachment") {
+			t.Fatalf("Content-Disposition = %q, want an attachment disposition forcing download", disp)
+		}
+	})
+
+	t.Run("plain text upload is unaffected, still served inline as its real type", func(t *testing.T) {
+		plain := upload("notes.txt", []byte("just some notes, nothing executable"))
+
+		rec := doAuth(t, srv, http.MethodGet, "/api/files/"+plain.ID, token, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got == "application/octet-stream" {
+			t.Fatalf("Content-Type = %q — a harmless text file must not be downgraded to octet-stream", got)
+		}
+		if disp := rec.Header().Get("Content-Disposition"); disp != "" {
+			t.Fatalf("Content-Disposition = %q, want none for a normal inline-served file", disp)
 		}
 	})
 }

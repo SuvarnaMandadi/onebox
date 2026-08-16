@@ -76,6 +76,28 @@ func newChatAttachmentTestServer(t *testing.T) (*Server, string) {
 	return srv, bootstrapAdmin(t, srv)
 }
 
+// uploadChatAttachment POSTs a file to /api/chat-attachments as the given
+// admin and returns the decoded response — the same
+// multipartUploadRequest+ServeHTTP+decode sequence every test in this file
+// otherwise repeats inline, extracted here so callers outside this file
+// (e.g. chatbot_context_refs_test.go's coexistence test) don't need to
+// duplicate it a fifth time.
+func uploadChatAttachment(t *testing.T, srv *Server, adminToken, filename string, content []byte) chatAttachmentRecord {
+	t.Helper()
+	req := multipartUploadRequest(t, "/api/chat-attachments", "file", filename, content)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload chat attachment: status = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+	var att chatAttachmentRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &att); err != nil {
+		t.Fatalf("unmarshal chat attachment response: %v (body: %s)", err, rec.Body.String())
+	}
+	return att
+}
+
 func TestUploadChatAttachmentDocumentExtractsText(t *testing.T) {
 	srv, adminToken := newChatAttachmentTestServer(t)
 
@@ -325,25 +347,6 @@ func TestChatbotRejectsEmptyMessageWithNoAttachments(t *testing.T) {
 	}
 }
 
-// uploadChatAttachment is a small test helper — uploads one file via the
-// real HTTP handler and decodes the resulting record, saving every
-// multi-attachment/streaming/coexistence test below the repetition.
-func uploadChatAttachment(t *testing.T, srv *Server, adminToken, filename string, content []byte) chatAttachmentRecord {
-	t.Helper()
-	req := multipartUploadRequest(t, "/api/chat-attachments", "file", filename, content)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	rec := httptest.NewRecorder()
-	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("upload %q: status = %d, body = %s", filename, rec.Code, rec.Body.String())
-	}
-	var att chatAttachmentRecord
-	if err := json.Unmarshal(rec.Body.Bytes(), &att); err != nil {
-		t.Fatalf("decode upload response: %v", err)
-	}
-	return att
-}
-
 // TestChatbotMultipleAttachmentsInOneMessage pins that an image and a
 // document attached to the same message are both resolved correctly in
 // the same request — the image reaches Images, the document's text
@@ -447,18 +450,27 @@ func TestChatbotAttachmentImageWithOpenAI(t *testing.T) {
 // TestChatbotAttachmentsCoexistWithProposals is the regression guard for
 // M1 not breaking the AI Action Cards / Proposal architecture from the
 // previous milestone: a message with an image attachment, whose reply
-// also happens to call a valid create_collection tool, must come back
+// also happens to call a valid delete_collection tool, must come back
 // with both the image having reached the model AND a validated proposal
 // in the response — attachment resolution and the
 // ActionParser -> ProposalValidator pipeline are independent concerns
-// that must not interfere with each other.
+// that must not interfere with each other. Uses a destructive action
+// (delete_collection) rather than create_collection deliberately: as of
+// the AI-execution milestone (chatbot_tool_execution.go), a safe action
+// like create_collection auto-executes and triggers a second
+// tool-execution-loop round, which would replace fake.lastMessages with
+// that later round's messages (no Images on it) before this test ever
+// gets to inspect it. A destructive action never auto-executes (see
+// autoExecutable), so the turn stays a single round and fake.lastMessages
+// is still round 1's — the one the image and proposal actually rode in on.
 func TestChatbotAttachmentsCoexistWithProposals(t *testing.T) {
 	srv, adminToken := newChatAttachmentTestServer(t)
+	seedCollection(t, srv.db, "notes", Field{Name: "body", Type: FieldText})
 	img := uploadChatAttachment(t, srv, adminToken, "mockup.png", []byte("fake-png-bytes"))
 
 	fake := &fakeLLMClient{
-		reply:     "Here's a collection based on your mockup.",
-		toolCalls: []llm.ToolCall{toolCall(actionCreateCollection, map[string]any{"name": "notes", "fields": []map[string]any{{"name": "body", "type": "text"}}})},
+		reply:     "Here's a proposal based on your mockup.",
+		toolCalls: []llm.ToolCall{toolCall(actionDeleteCollection, map[string]any{"name": "notes"})},
 	}
 	bundle := *srv.providers.Load()
 	bundle.llm = &llm.Router{Anthropic: fake}
@@ -466,7 +478,7 @@ func TestChatbotAttachmentsCoexistWithProposals(t *testing.T) {
 	srv.providers.Store(&bundle)
 
 	rec := doAuth(t, srv, http.MethodPost, "/api/chat", adminToken, chatbotRequest{
-		Message:       "create a collection based on this mockup",
+		Message:       "based on this mockup, delete the notes collection",
 		AttachmentIDs: []string{img.ID},
 	})
 	if rec.Code != http.StatusOK {
@@ -485,7 +497,7 @@ func TestChatbotAttachmentsCoexistWithProposals(t *testing.T) {
 	if len(resp.Actions) != 1 {
 		t.Fatalf("expected 1 validated proposal alongside the attachment, got %d: %+v", len(resp.Actions), resp.Actions)
 	}
-	if resp.Actions[0].Type != actionCreateCollection {
-		t.Fatalf("action type = %q, want %q", resp.Actions[0].Type, actionCreateCollection)
+	if resp.Actions[0].Type != actionDeleteCollection {
+		t.Fatalf("action type = %q, want %q", resp.Actions[0].Type, actionDeleteCollection)
 	}
 }

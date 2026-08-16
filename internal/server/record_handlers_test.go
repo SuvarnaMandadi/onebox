@@ -348,3 +348,107 @@ func TestMixedCaseCollectionFieldsAndValues(t *testing.T) {
 		t.Fatalf("list failed: status = %d, body = %s", listRec.Code, listRec.Body.String())
 	}
 }
+
+// setupCustomersAndOrders seeds a "customers" collection and an "orders"
+// collection with a customer_id relation field pointing at it — the
+// Milestone 6 fixture shared by the relation-validation tests below.
+// Returns the admin token and one real customer id to relate to.
+func setupCustomersAndOrders(t *testing.T, srv *Server) (token, customerID string) {
+	t.Helper()
+	token = bootstrapAdmin(t, srv)
+
+	createCustomers := doAuth(t, srv, http.MethodPost, "/api/collections", token, createCollectionRequest{
+		Name:   "customers",
+		Schema: Schema{Fields: []Field{{Name: "name", Type: FieldText, Required: true}}},
+		Rules:  DefaultRules(),
+	})
+	if createCustomers.Code != http.StatusCreated {
+		t.Fatalf("create customers failed: status = %d, body = %s", createCustomers.Code, createCustomers.Body.String())
+	}
+
+	createOrders := doAuth(t, srv, http.MethodPost, "/api/collections", token, createCollectionRequest{
+		Name: "orders",
+		Schema: Schema{Fields: []Field{
+			{Name: "total", Type: FieldNumber, Required: true},
+			{Name: "customer_id", Type: FieldRelation, RelationCollection: "customers"},
+		}},
+		Rules: DefaultRules(),
+	})
+	if createOrders.Code != http.StatusCreated {
+		t.Fatalf("create orders failed: status = %d, body = %s", createOrders.Code, createOrders.Body.String())
+	}
+
+	custRec := doAuth(t, srv, http.MethodPost, "/api/collections/customers/records", token, map[string]any{"name": "Ada"})
+	if custRec.Code != http.StatusCreated {
+		t.Fatalf("create customer failed: status = %d, body = %s", custRec.Code, custRec.Body.String())
+	}
+	var cust map[string]any
+	if err := json.Unmarshal(custRec.Body.Bytes(), &cust); err != nil {
+		t.Fatalf("decode customer: %v", err)
+	}
+	return token, cust["id"].(string)
+}
+
+// TestCreateRecordValidatesRelationExists is the Milestone 6 pin for
+// record-level relation validation (validateRelationValues, records.go):
+// a relation field value that names a real record in the target collection
+// is accepted; one that doesn't is rejected with invalid_record, the same
+// error code every other malformed-record case already uses.
+func TestCreateRecordValidatesRelationExists(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token, customerID := setupCustomersAndOrders(t, srv)
+
+	ok := doAuth(t, srv, http.MethodPost, "/api/collections/orders/records", token, map[string]any{
+		"total": 42, "customer_id": customerID,
+	})
+	if ok.Code != http.StatusCreated {
+		t.Fatalf("valid relation: status = %d, want 201, body = %s", ok.Code, ok.Body.String())
+	}
+
+	bad := doAuth(t, srv, http.MethodPost, "/api/collections/orders/records", token, map[string]any{
+		"total": 10, "customer_id": "does-not-exist",
+	})
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("nonexistent relation target: status = %d, want 400, body = %s", bad.Code, bad.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(bad.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if env.Code != "invalid_record" {
+		t.Fatalf("code = %q, want %q", env.Code, "invalid_record")
+	}
+
+	// customer_id is optional (not Required) — omitting it entirely must
+	// still succeed, same as any other optional field.
+	noRelation := doAuth(t, srv, http.MethodPost, "/api/collections/orders/records", token, map[string]any{"total": 5})
+	if noRelation.Code != http.StatusCreated {
+		t.Fatalf("omitted optional relation: status = %d, want 201, body = %s", noRelation.Code, noRelation.Body.String())
+	}
+}
+
+// TestUpdateRecordValidatesRelationExists confirms the same relation-target
+// check runs on PATCH, not just create — a record can't be repointed at a
+// customer id that doesn't exist either.
+func TestUpdateRecordValidatesRelationExists(t *testing.T) {
+	srv, _ := newTestServer(t)
+	token, customerID := setupCustomersAndOrders(t, srv)
+
+	create := doAuth(t, srv, http.MethodPost, "/api/collections/orders/records", token, map[string]any{
+		"total": 42, "customer_id": customerID,
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create failed: status = %d, body = %s", create.Code, create.Body.String())
+	}
+	var order map[string]any
+	if err := json.Unmarshal(create.Body.Bytes(), &order); err != nil {
+		t.Fatalf("decode order: %v", err)
+	}
+
+	update := doAuth(t, srv, http.MethodPatch, "/api/collections/orders/records/"+order["id"].(string), token, map[string]any{
+		"customer_id": "ghost-customer",
+	})
+	if update.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", update.Code, update.Body.String())
+	}
+}

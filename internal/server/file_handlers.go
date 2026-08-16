@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,34 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
+
+// browserExecutableMimeTypes are the MIME types a browser will render/
+// execute rather than just display/decode — serving one of these back
+// from the same origin the dashboard/API itself runs on is a stored-XSS
+// vector if an admin or user is ever tricked into opening a malicious
+// upload's /api/files/{id} URL directly (a crafted .html or .svg file,
+// classified at upload time by http.DetectContentType — see
+// handleUploadFile). handleServeFile forces these to download instead of
+// render — see its doc comment.
+var browserExecutableMimeTypes = map[string]bool{
+	"text/html":             true,
+	"application/xhtml+xml": true,
+	"image/svg+xml":         true,
+}
+
+// isBrowserExecutableMime reports whether the stored Mime (which may carry
+// a "; charset=..." parameter — e.g. http.DetectContentType's own
+// "text/html; charset=utf-8" — since that's exactly what handleUploadFile
+// stores it as) names one of browserExecutableMimeTypes. Parsed rather than
+// matched as a raw substring/prefix so a parameter never accidentally
+// widens or narrows the match.
+func isBrowserExecutableMime(rawMime string) bool {
+	base, _, err := mime.ParseMediaType(rawMime)
+	if err != nil {
+		base = rawMime
+	}
+	return browserExecutableMimeTypes[base]
+}
 
 func parseCreatedTime(s string) time.Time {
 	t, err := time.Parse(time.RFC3339Nano, s)
@@ -122,6 +151,16 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": files, "nextCursor": nextCursor, "total": total})
 }
 
+// handleServeFile always sends X-Content-Type-Options: nosniff (so a
+// browser trusts the declared Content-Type rather than re-sniffing the
+// body itself), and additionally forces a browser-executable upload
+// (text/html, application/xhtml+xml, image/svg+xml — see
+// browserExecutableMimeTypes) to download as application/octet-stream
+// with Content-Disposition: attachment instead of the normal inline serve
+// below — otherwise a malicious .html/.svg upload would render/execute in
+// this API's own origin the moment its /api/files/{id} URL is opened
+// directly, a stored-XSS vector. Every other MIME type (images, PDFs,
+// plain text, ...) is unaffected — still served inline exactly as before.
 func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -146,6 +185,24 @@ func (s *Server) handleServeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+
+	// X-Content-Type-Options always goes out, regardless of MIME type — a
+	// blanket guard against a browser second-guessing the declared
+	// Content-Type via its own content-sniffing heuristics for anything
+	// this handler didn't already decide to force to attachment below.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	if isBrowserExecutableMime(rec.Mime) {
+		// A malicious .html/.svg upload must never render/execute in this
+		// origin — force it to download instead of the normal inline
+		// serve-as-declared-type below. Content-Disposition's filename is
+		// quoted and has any embedded quote escaped so a crafted filename
+		// can't break out of the header value.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": rec.Filename}))
+		http.ServeContent(w, r, rec.Filename, parseCreatedTime(rec.Created), f)
+		return
+	}
 
 	w.Header().Set("Content-Type", rec.Mime)
 	http.ServeContent(w, r, rec.Filename, parseCreatedTime(rec.Created), f)

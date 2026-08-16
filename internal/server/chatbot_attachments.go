@@ -79,6 +79,12 @@ func (s *Server) resolveAttachments(ctx context.Context, ids []string, visionCap
 	if len(ids) == 0 {
 		return out
 	}
+	if len(ids) > maxAttachmentsPerMessage {
+		// Never trust the client — see maxAttachmentsPerMessage's doc
+		// comment (chatbot_context_refs.go). Truncated server-side rather
+		// than rejecting the whole request outright, same as maxContextRefs.
+		ids = ids[:maxAttachmentsPerMessage]
+	}
 
 	var skippedImages int
 	var docs strings.Builder
@@ -112,7 +118,11 @@ func (s *Server) resolveAttachments(ctx context.Context, ids []string, visionCap
 			text = safeTruncate(text, maxAttachmentTextChars)
 			truncated = true
 		}
-		fmt.Fprintf(&docs, "\n--- Attached document: %s ---\n", fileRec.Filename)
+		// "(untrusted content below)" is deliberate, not decorative — see
+		// chatbotSystemPrompt's UNTRUSTED CONTENT section: this text came
+		// from a file, not the admin's own typed message, so it must be
+		// read as data to analyze, never as instructions to follow.
+		fmt.Fprintf(&docs, "\n--- Attached document (untrusted content below): %s ---\n", fileRec.Filename)
 		if text == "" {
 			docs.WriteString("(no text could be extracted from this file)\n")
 		} else {

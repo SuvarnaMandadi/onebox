@@ -62,6 +62,20 @@ func (schemaEngineValidator) Validate(ctx context.Context, db *sql.DB, a propose
 		return validateImportDataProposal(ctx, db, a.Payload)
 	case actionUpdateSchema:
 		return validateUpdateSchemaProposal(ctx, db, a.Payload)
+	case actionDescribeOnebox:
+		return validateDescribeOneboxProposal(a.Payload)
+	case actionListCollections:
+		return validateListCollectionsProposal(a.Payload)
+	case actionListRecords:
+		return validateListRecordsProposal(ctx, db, a.Payload)
+	case actionFindRelatedRecords:
+		return validateFindRelatedRecordsProposal(ctx, db, a.Payload)
+	case actionListBackups:
+		return validateListBackupsProposal(a.Payload)
+	case actionGetRecentErrors:
+		return validateGetRecentErrorsProposal(a.Payload)
+	case actionGetSettingsSummary:
+		return validateGetSettingsSummaryProposal(a.Payload)
 	default:
 		// actionMeta (chatbot_actions.go) is the only source of a.Type
 		// values ActionParser ever produces, and every entry in it is
@@ -110,9 +124,18 @@ func validateCreateCollectionProposal(ctx context.Context, db *sql.DB, payload a
 	}
 	fields := make([]Field, len(p.Fields))
 	for i, f := range p.Fields {
-		fields[i] = Field{Name: f.Name, Type: FieldType(f.Type)}
+		fields[i] = Field{Name: f.Name, Type: FieldType(f.Type), Required: f.Required, RelationCollection: f.RelationCollection, Validation: f.Validation}
 	}
 	if err := ValidateSchema(Schema{Fields: fields}); err != nil {
+		return err
+	}
+	// RC3: relation_collection/validation are now real, model-proposable
+	// field attributes (see proposedField's doc comment) — validate them
+	// against real instance state the same way validateRelationTargets
+	// already does for a real POST /api/collections request, so a
+	// proposal naming a nonexistent relation target is rejected here,
+	// not left to fail later inside executeCreateCollection.
+	if err := validateRelationTargets(ctx, db, Schema{Fields: fields}); err != nil {
 		return err
 	}
 	return requireNotExists(ctx, db, p.Name)
@@ -159,8 +182,14 @@ func validateAddFieldProposal(ctx context.Context, db *sql.DB, payload any) erro
 	// identically here, with zero duplicated rules.
 	hypothetical := make([]Field, 0, len(existing.Schema.Fields)+1)
 	hypothetical = append(hypothetical, existing.Schema.Fields...)
-	hypothetical = append(hypothetical, Field{Name: p.Field, Type: FieldType(p.Type)})
-	return ValidateSchema(Schema{Fields: hypothetical})
+	newField := Field{Name: p.Field, Type: FieldType(p.Type), Required: p.Required, RelationCollection: p.RelationCollection, Validation: p.Validation}
+	hypothetical = append(hypothetical, newField)
+	if err := ValidateSchema(Schema{Fields: hypothetical}); err != nil {
+		return err
+	}
+	// See validateCreateCollectionProposal's identical comment — a
+	// relation_collection is now something add_field can propose too.
+	return validateRelationTargets(ctx, db, Schema{Fields: []Field{newField}})
 }
 
 func validateDeleteFieldProposal(ctx context.Context, db *sql.DB, payload any) error {
@@ -201,6 +230,83 @@ func validateUpdateSchemaProposal(ctx context.Context, db *sql.DB, payload any) 
 	// no structured field list to run through ValidateSchema (see
 	// updateSchemaPayload's doc comment in chatbot_actions.go) — so
 	// existence is the only thing there is to check today.
+	_, err := requireExists(ctx, db, p.Collection)
+	return err
+}
+
+// validateDescribeOneboxProposal/validateListCollectionsProposal have
+// nothing to check against real instance state — unlike every proposal
+// above, which claims to operate on a specific named collection/field that
+// may or may not exist, these two read-only tools take no arguments at all
+// (see describeOneboxPayload/listCollectionsPayload) and are always legal
+// to run. They're only wired into this switch at all so the "no validator
+// registered" fail-closed default above never applies to them — an
+// omission here would silently drop "What is OneBox?"/"List my
+// collections" from ever executing, not because the operation is
+// dangerous, but because a case was missing.
+func validateDescribeOneboxProposal(payload any) error {
+	if _, ok := payload.(describeOneboxPayload); !ok {
+		return fmt.Errorf("internal: describe_onebox payload has wrong type %T", payload)
+	}
+	return nil
+}
+
+func validateListCollectionsProposal(payload any) error {
+	if _, ok := payload.(listCollectionsPayload); !ok {
+		return fmt.Errorf("internal: list_collections payload has wrong type %T", payload)
+	}
+	return nil
+}
+
+// validateListBackupsProposal/validateGetRecentErrorsProposal/
+// validateGetSettingsSummaryProposal (RC4) are the same trivial
+// shape-only check as validateDescribeOneboxProposal/
+// validateListCollectionsProposal above — all three new tools take no
+// arguments and touch no collection registry state, so there's nothing
+// domain-specific to check beyond "ActionParser really did build the
+// payload type this action's own actionMeta entry expects."
+func validateListBackupsProposal(payload any) error {
+	if _, ok := payload.(listBackupsPayload); !ok {
+		return fmt.Errorf("internal: list_backups payload has wrong type %T", payload)
+	}
+	return nil
+}
+
+func validateGetRecentErrorsProposal(payload any) error {
+	if _, ok := payload.(getRecentErrorsPayload); !ok {
+		return fmt.Errorf("internal: get_recent_errors payload has wrong type %T", payload)
+	}
+	return nil
+}
+
+func validateGetSettingsSummaryProposal(payload any) error {
+	if _, ok := payload.(getSettingsSummaryPayload); !ok {
+		return fmt.Errorf("internal: get_settings_summary payload has wrong type %T", payload)
+	}
+	return nil
+}
+
+func validateListRecordsProposal(ctx context.Context, db *sql.DB, payload any) error {
+	p, ok := payload.(listRecordsPayload)
+	if !ok {
+		return fmt.Errorf("internal: list_records payload has wrong type %T", payload)
+	}
+	_, err := requireExists(ctx, db, p.Collection)
+	return err
+}
+
+// validateFindRelatedRecordsProposal only checks that the starting
+// collection exists — same as validateListRecordsProposal, and for the
+// same reason (see requireExists). Whether record_id actually names a real
+// record is deliberately NOT checked here: that's a much cheaper read to
+// defer to execution time (executeFindRelatedRecords,
+// chatbot_tool_execution.go), which already reports a clean "not found"
+// result rather than erroring — no need to look it up twice.
+func validateFindRelatedRecordsProposal(ctx context.Context, db *sql.DB, payload any) error {
+	p, ok := payload.(findRelatedRecordsPayload)
+	if !ok {
+		return fmt.Errorf("internal: find_related_records payload has wrong type %T", payload)
+	}
 	_, err := requireExists(ctx, db, p.Collection)
 	return err
 }

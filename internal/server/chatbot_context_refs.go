@@ -15,6 +15,22 @@ import (
 // never gets near it.
 const maxContextRefs = 12
 
+// maxAttachmentsPerMessage bounds how many attachment_ids one chat request
+// may reference — the same never-trust-the-client discipline as
+// maxContextRefs above, applied to a different field: the dashboard's own
+// UI never lets an admin attach anywhere near this many files to one
+// message, but nothing before this stopped a crafted request from listing
+// hundreds of attachment_ids, each costing a DB lookup plus up to
+// maxAttachmentTextChars of injected prompt text (see resolveAttachments,
+// chatbot_attachments.go).
+const maxAttachmentsPerMessage = 12
+
+// maxConversationExcerptsPerMessage is maxAttachmentsPerMessage's
+// counterpart for conversation_excerpts — same reasoning, applied to
+// #mentioned other conversations instead of attached files (see
+// describeConversationExcerpts below).
+const maxConversationExcerptsPerMessage = 12
+
 // contextRefInput is one collection/record the admin explicitly attached
 // to a message — by dragging it out of the Collections/Records list, or
 // picking it from an @mention — as opposed to workspaceContext, which
@@ -122,6 +138,9 @@ func describeConversationExcerpts(excerpts []conversationExcerptInput) string {
 	if len(excerpts) == 0 {
 		return ""
 	}
+	if len(excerpts) > maxConversationExcerptsPerMessage {
+		excerpts = excerpts[:maxConversationExcerptsPerMessage]
+	}
 	var b strings.Builder
 	for _, e := range excerpts {
 		title := e.Title
@@ -134,7 +153,12 @@ func describeConversationExcerpts(excerpts []conversationExcerptInput) string {
 			text = safeTruncate(text, maxConversationExcerptChars)
 			truncated = true
 		}
-		fmt.Fprintf(&b, "\n--- Referenced conversation: %s ---\n", title)
+		// "(untrusted content below)" — same reasoning as the attached-
+		// document delimiter (chatbot_attachments.go): this text came from a
+		// PRIOR conversation, not the admin's current message, and must be
+		// read as data to analyze, never as instructions to follow. See
+		// chatbotSystemPrompt's UNTRUSTED CONTENT section.
+		fmt.Fprintf(&b, "\n--- Referenced conversation (untrusted content below): %s ---\n", title)
 		if text == "" {
 			b.WriteString("(no content)\n")
 		} else {

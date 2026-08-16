@@ -24,6 +24,52 @@ const (
 	actionDeleteField      = "delete_field"
 	actionImportData       = "import_data"
 	actionUpdateSchema     = "update_schema"
+	// actionDescribeOnebox and actionListCollections are read-only,
+	// non-destructive tools with real execution backing (see
+	// executeToolCall in chatbot_tool_execution.go) — added for the
+	// AI-execution milestone alongside the schema-changing actions above,
+	// which predate it. Unlike those, these never produce anything a
+	// Proposal Card would need to show: there's nothing to approve about
+	// looking something up, so autoExecutable always runs them
+	// immediately.
+	actionDescribeOnebox  = "describe_onebox"
+	actionListCollections = "list_collections"
+	// actionListRecords is the Milestone 5 addition that lets the model
+	// actually see record-level data mid-conversation instead of only
+	// whatever the admin happened to attach/mention up front — needed for
+	// any real "detect duplicates," "find missing data," or "analyze this
+	// collection" task, none of which are answerable from schema alone.
+	// Read-only and safe by the same reasoning as list_collections, and
+	// reuses the exact listRecords data-layer function the real
+	// GET /api/collections/:name/records endpoint calls — no parallel
+	// query path.
+	actionListRecords = "list_records"
+	// actionFindRelatedRecords is the Milestone 6 addition that lets the
+	// model traverse a relation field: given one record, resolve any
+	// relation field's value forward (the record it points to — "this
+	// order's customer") and scan every other collection's schema for a
+	// relation field pointing back at this one, reporting the matching
+	// records (reverse — "every order for this customer"). Read-only,
+	// reuses getCollectionByName/getRecord/listCollections/listRecords —
+	// the exact same lookups real API requests already use — and is
+	// autoExecutable for the same reason list_records is: nothing it does
+	// can change data.
+	actionFindRelatedRecords = "find_related_records"
+	// actionListBackups, actionGetRecentErrors, and actionGetSettingsSummary
+	// are the RC4 additions that close a real gap: every other tool up to
+	// this point only ever grounds the model in collections/fields/records,
+	// so a question about backup health, recent errors, or which LLM
+	// provider is configured had no real data to call — the model either
+	// guessed from workspaceContext (only populated when the admin happens
+	// to be on that exact page — see describeWorkspace) or made something
+	// up. All three are read-only and reuse the exact data-layer functions
+	// their own dashboard pages already call (listBackupHistory, listLogs,
+	// s.providers.Load()) — same "no parallel query path" discipline as
+	// list_records/find_related_records — so they're autoExecutable for the
+	// same reason those are: nothing here can change data.
+	actionListBackups        = "list_backups"
+	actionGetRecentErrors    = "get_recent_errors"
+	actionGetSettingsSummary = "get_settings_summary"
 )
 
 // newActionID returns a short opaque identifier for one proposedAction —
@@ -43,10 +89,17 @@ func newActionID() string {
 	return "act_" + hex.EncodeToString(buf)
 }
 
-// proposedField is one entry in a create_collection action's Payload.
+// proposedField is one entry in a create_collection or add_field action's
+// Payload — mirrors Field (collection_schema.go) field-for-field (RC3:
+// Required/RelationCollection/Validation added alongside the original
+// Name/Type) so executeCreateCollection/executeAddField can convert one
+// straight into the other with no lossy translation in between.
 type proposedField struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name               string           `json:"name"`
+	Type               string           `json:"type"`
+	Required           bool             `json:"required,omitempty"`
+	RelationCollection string           `json:"relation_collection,omitempty"`
+	Validation         *FieldValidation `json:"validation,omitempty"`
 }
 
 // -- tool schemas ------------------------------------------------------
@@ -57,6 +110,40 @@ type proposedField struct {
 // expects. The model fills these in itself via native tool/function
 // calling; nothing here is ever inferred from its prose reply.
 
+// validationSchemaProp is the "validation" property shared by
+// create_collection's and add_field's field-item schemas (RC3) — the same
+// literal, so both tools describe validation rules identically. Rules are
+// only meaningful on the matching field type — the description says so
+// explicitly, since there's no JSON-Schema-level way to say "only when
+// type=text" within this subset (see this file's own doc comment on why
+// every schema here stays the plain object/properties/required subset).
+const validationSchemaProp = `"validation": {
+		"type": "object",
+		"description": "Optional validation rules, only meaningful on the matching field type — never set a rule on a field type it doesn't apply to.",
+		"properties": {
+			"format": {"type": "string", "enum": ["email", "url"], "description": "text only"},
+			"min_length": {"type": "number", "description": "text only"},
+			"max_length": {"type": "number", "description": "text only"},
+			"pattern": {"type": "string", "description": "text only — a regular expression the value must match"},
+			"min": {"type": "number", "description": "number only"},
+			"max": {"type": "number", "description": "number only"},
+			"unique": {"type": "boolean", "description": "any type — no other record may share this field's value"}
+		}
+	}`
+
+// fieldItemSchemaProps is create_collection's field-item shape (RC3): a
+// field is no longer just name+type — it can declare required, a relation
+// target, and validation rules, the same three things a real
+// POST /api/collections request already accepts (see Field/FieldValidation
+// in collection_schema.go).
+const fieldItemSchemaProps = `{
+	"name": {"type": "string"},
+	"type": {"type": "string", "enum": ["text", "number", "bool", "date", "json", "relation"], "description": "Use \"relation\" for a field that references another collection's record (then set relation_collection)."},
+	"required": {"type": "boolean", "description": "Whether this field must always have a value. Propose true for anything the record genuinely can't exist without (e.g. a customer's name, an order's total)."},
+	"relation_collection": {"type": "string", "description": "Required when type is \"relation\" — the target collection this field points to. Must be an existing collection."},
+	` + validationSchemaProp + `
+}`
+
 var createCollectionSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
@@ -66,11 +153,19 @@ var createCollectionSchema = json.RawMessage(`{
 			"description": "The fields to create on this collection, beyond the automatic id/owner_id/created/updated columns — never list those here.",
 			"items": {
 				"type": "object",
-				"properties": {
-					"name": {"type": "string"},
-					"type": {"type": "string", "enum": ["text", "number", "bool", "date", "json"]}
-				},
+				"properties": ` + fieldItemSchemaProps + `,
 				"required": ["name", "type"]
+			}
+		},
+		"rules": {
+			"type": "object",
+			"description": "Who can list/view/create/update/delete records in this collection. Omit a key (or the whole object) to use the safe default (authenticated for list/view/create, owner for update/delete). Propose \"owner\" for anything personal/private, \"public\" only when the admin clearly wants unauthenticated access.",
+			"properties": {
+				"list": {"type": "string", "enum": ["public", "authenticated", "owner"]},
+				"view": {"type": "string", "enum": ["public", "authenticated", "owner"]},
+				"create": {"type": "string", "enum": ["public", "authenticated", "owner"]},
+				"update": {"type": "string", "enum": ["public", "authenticated", "owner"]},
+				"delete": {"type": "string", "enum": ["public", "authenticated", "owner"]}
 			}
 		}
 	},
@@ -99,7 +194,10 @@ var addFieldSchema = json.RawMessage(`{
 	"properties": {
 		"collection": {"type": "string"},
 		"field": {"type": "string", "description": "The new field's name"},
-		"type": {"type": "string", "enum": ["text", "number", "bool", "date", "json"]}
+		"type": {"type": "string", "enum": ["text", "number", "bool", "date", "json", "relation"], "description": "Use \"relation\" for a field that references another collection's record (then set relation_collection)."},
+		"required": {"type": "boolean", "description": "Whether this field must always have a value."},
+		"relation_collection": {"type": "string", "description": "Required when type is \"relation\" — the target collection this field points to."},
+		` + validationSchemaProp + `
 	},
 	"required": ["collection", "field", "type"]
 }`)
@@ -129,6 +227,37 @@ var updateSchemaSchema = json.RawMessage(`{
 	},
 	"required": ["collection", "summary"]
 }`)
+
+// describeOneboxSchema/listCollectionsSchema take no arguments at all — an
+// empty object, not omitted entirely, since every provider here expects a
+// well-formed (if trivial) JSON Schema object per tool.
+var describeOneboxSchema = json.RawMessage(`{"type": "object", "properties": {}}`)
+var listCollectionsSchema = json.RawMessage(`{"type": "object", "properties": {}}`)
+
+var listRecordsSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"collection": {"type": "string", "description": "The collection to read records from"},
+		"limit": {"type": "number", "description": "Max records to return (default 20, capped at 50)"}
+	},
+	"required": ["collection"]
+}`)
+
+var findRelatedRecordsSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"collection": {"type": "string", "description": "The collection containing the starting record"},
+		"record_id": {"type": "string", "description": "The id of the record to find relationships for"}
+	},
+	"required": ["collection", "record_id"]
+}`)
+
+// listBackupsSchema/getRecentErrorsSchema/getSettingsSummarySchema (RC4)
+// take no arguments — same empty-object convention as
+// describeOneboxSchema/listCollectionsSchema above.
+var listBackupsSchema = json.RawMessage(`{"type": "object", "properties": {}}`)
+var getRecentErrorsSchema = json.RawMessage(`{"type": "object", "properties": {}}`)
+var getSettingsSummarySchema = json.RawMessage(`{"type": "object", "properties": {}}`)
 
 // actionToolDefs is what answerChatbotQuestion offers the model on every
 // full (non-greeting) chat turn — see chatbot_handlers.go. Description is
@@ -171,6 +300,41 @@ var actionToolDefs = []llm.Tool{
 		Description: "Propose a broader schema change to an existing collection that isn't just adding or deleting a single field (e.g. changing several fields' types or requiredness at once). Call this for that case; use add_field/delete_field instead for a single-field change.",
 		Schema:      updateSchemaSchema,
 	},
+	{
+		Name:        actionDescribeOnebox,
+		Description: "Look up a description of what OneBox is and what it does. Always call this for a general question like \"What is OneBox?\" or \"What can this do?\" instead of answering from your own general knowledge, so the answer reflects this specific product accurately.",
+		Schema:      describeOneboxSchema,
+	},
+	{
+		Name:        actionListCollections,
+		Description: "List the collections that currently exist in this workspace, with their field and record counts. Call this whenever the admin asks to see/list their collections rather than guessing from workspace context alone.",
+		Schema:      listCollectionsSchema,
+	},
+	{
+		Name:        actionListRecords,
+		Description: "Read actual records from a collection. Call this whenever answering requires seeing real data — finding duplicates, spotting missing/inconsistent values, summarizing or analyzing a collection's contents, or any question about specific records — rather than guessing from the schema alone. Call it more than once (different collections, or again after reasoning about the first batch) if the task needs it.",
+		Schema:      listRecordsSchema,
+	},
+	{
+		Name:        actionFindRelatedRecords,
+		Description: "Follow relation fields from one record: resolves any relation field on the record to the record it points to (e.g. an order's customer_id -> the customer it belongs to), and finds every record in any OTHER collection whose relation field points back at this one (e.g. every order that references this customer). Call this whenever asked how records relate to each other — \"find this order's customer\", \"find all orders for this customer\", \"what links to this record\" — instead of guessing from field names alone.",
+		Schema:      findRelatedRecordsSchema,
+	},
+	{
+		Name:        actionListBackups,
+		Description: "List this workspace's backup history (when each backup ran, its trigger, status, size, table count). Call this for any question about backups — whether one exists, how recent it is, whether backups are healthy — instead of guessing; never assume a backup exists or is recent without calling this first.",
+		Schema:      listBackupsSchema,
+	},
+	{
+		Name:        actionGetRecentErrors,
+		Description: "Read the most recent failed (4xx/5xx) API requests from this instance's request log. Call this whenever asked about errors, failures, or \"what's going wrong\" rather than guessing — this is real request history, not something to infer from the schema.",
+		Schema:      getRecentErrorsSchema,
+	},
+	{
+		Name:        actionGetSettingsSummary,
+		Description: "Read this instance's current configuration: which chat/embedding providers and models are set up, whether scheduled backups are configured. Call this for any question about current settings/configuration instead of guessing — never assume a provider or feature is or isn't configured without checking.",
+		Schema:      getSettingsSummarySchema,
+	},
 }
 
 // -- payloads ------------------------------------------------------------
@@ -184,6 +348,13 @@ var actionToolDefs = []llm.Tool{
 type createCollectionPayload struct {
 	Name   string          `json:"name"`
 	Fields []proposedField `json:"fields"`
+	// Rules is the zero value (every RuleKind "") when the model doesn't
+	// propose access control — createCollection already treats that as
+	// "fill in DefaultRules" for a real API request, so leaving this
+	// unset here reproduces the exact same safe-by-default behavior (RC3
+	// closes the gap where the model previously had no channel to propose
+	// rules at all — see executeCreateCollection).
+	Rules Rules `json:"rules,omitempty"`
 }
 type deleteCollectionPayload struct {
 	Name string `json:"name"`
@@ -193,9 +364,12 @@ type renameCollectionPayload struct {
 	To   string `json:"to"`
 }
 type addFieldPayload struct {
-	Collection string `json:"collection"`
-	Field      string `json:"field"`
-	Type       string `json:"type"`
+	Collection         string           `json:"collection"`
+	Field              string           `json:"field"`
+	Type               string           `json:"type"`
+	Required           bool             `json:"required,omitempty"`
+	RelationCollection string           `json:"relation_collection,omitempty"`
+	Validation         *FieldValidation `json:"validation,omitempty"`
 }
 type deleteFieldPayload struct {
 	Collection string `json:"collection"`
@@ -208,6 +382,19 @@ type updateSchemaPayload struct {
 	Collection string `json:"collection"`
 	Summary    string `json:"summary"`
 }
+type describeOneboxPayload struct{}
+type listCollectionsPayload struct{}
+type listRecordsPayload struct {
+	Collection string `json:"collection"`
+	Limit      int    `json:"limit,omitempty"`
+}
+type findRelatedRecordsPayload struct {
+	Collection string `json:"collection"`
+	RecordID   string `json:"record_id"`
+}
+type listBackupsPayload struct{}
+type getRecentErrorsPayload struct{}
+type getSettingsSummaryPayload struct{}
 
 // strictUnmarshal decodes a tool call's Arguments into the matching
 // payload struct, rejecting any property the schema didn't declare
@@ -323,6 +510,76 @@ var actionMeta = map[string]actionMetaEntry{
 			return desc, p, true
 		},
 	},
+	actionDescribeOnebox: {
+		title: "Describe OneBox", destructive: false,
+		build: func(args json.RawMessage) (string, any, bool) {
+			var p describeOneboxPayload
+			if err := strictUnmarshal(args, &p); err != nil {
+				return "", nil, false
+			}
+			return "Look up a description of OneBox", p, true
+		},
+	},
+	actionListCollections: {
+		title: "List Collections", destructive: false,
+		build: func(args json.RawMessage) (string, any, bool) {
+			var p listCollectionsPayload
+			if err := strictUnmarshal(args, &p); err != nil {
+				return "", nil, false
+			}
+			return "List the workspace's collections", p, true
+		},
+	},
+	actionListRecords: {
+		title: "Read Records", destructive: false,
+		build: func(args json.RawMessage) (string, any, bool) {
+			var p listRecordsPayload
+			if err := strictUnmarshal(args, &p); err != nil || p.Collection == "" {
+				return "", nil, false
+			}
+			return fmt.Sprintf("Read records from collection %q", p.Collection), p, true
+		},
+	},
+	actionFindRelatedRecords: {
+		title: "Find Related Records", destructive: false,
+		build: func(args json.RawMessage) (string, any, bool) {
+			var p findRelatedRecordsPayload
+			if err := strictUnmarshal(args, &p); err != nil || p.Collection == "" || p.RecordID == "" {
+				return "", nil, false
+			}
+			return fmt.Sprintf("Find records related to %s/%s", p.Collection, p.RecordID), p, true
+		},
+	},
+	actionListBackups: {
+		title: "List Backups", destructive: false,
+		build: func(args json.RawMessage) (string, any, bool) {
+			var p listBackupsPayload
+			if err := strictUnmarshal(args, &p); err != nil {
+				return "", nil, false
+			}
+			return "List this workspace's backup history", p, true
+		},
+	},
+	actionGetRecentErrors: {
+		title: "Get Recent Errors", destructive: false,
+		build: func(args json.RawMessage) (string, any, bool) {
+			var p getRecentErrorsPayload
+			if err := strictUnmarshal(args, &p); err != nil {
+				return "", nil, false
+			}
+			return "Read recent failed requests from the log", p, true
+		},
+	},
+	actionGetSettingsSummary: {
+		title: "Get Settings Summary", destructive: false,
+		build: func(args json.RawMessage) (string, any, bool) {
+			var p getSettingsSummaryPayload
+			if err := strictUnmarshal(args, &p); err != nil {
+				return "", nil, false
+			}
+			return "Read the current provider/backup configuration", p, true
+		},
+	},
 }
 
 func orText(fieldType string) string {
@@ -377,7 +634,7 @@ func (nativeToolCallParser) ParseActions(result llm.ChatResult) []proposedAction
 		return nil
 	}
 	actions := make([]proposedAction, 0, len(result.ToolCalls))
-	for _, call := range result.ToolCalls {
+	for i, call := range result.ToolCalls {
 		meta, known := actionMeta[call.Name]
 		if !known {
 			continue // the model named a tool we never offered it — ignore rather than guess
@@ -389,6 +646,7 @@ func (nativeToolCallParser) ParseActions(result llm.ChatResult) []proposedAction
 		actions = append(actions, proposedAction{
 			ID: newActionID(), Type: call.Name, Title: meta.title,
 			Description: description, Payload: payload, Destructive: meta.destructive,
+			CallIndex: i,
 		})
 	}
 	return actions

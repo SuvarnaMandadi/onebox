@@ -52,21 +52,46 @@ type fakeLLMClient struct {
 	// conversation history (multiple user/assistant turns in one request)
 	// read this instead.
 	lastMessages []llm.Message
-	// lastTools is the Tools slice from the most recent call — tests that
-	// care whether actionToolDefs actually reached the provider (rather
-	// than just trusting the response) read this.
+	// lastTools is the Tools slice from the most recent request — tests
+	// assert on this to confirm actionToolDefs was (or wasn't) offered on
+	// a given code path (see TestFastPathOffersNoTools,
+	// TestChatbotAutoExecutesSafeActionNonStreaming in
+	// chatbot_actions_test.go).
 	lastTools []llm.Tool
-	// reply, if set, is returned as ChatResult.Content instead of the
-	// default "fake answer" — set by tests that need to control what the
-	// "model" said.
+	// reply overrides the fixed "fake answer" content when set — lets
+	// action-pipeline tests assert Reply and Actions are independent of
+	// each other. Used on every call unless roundReplies (below) is set,
+	// in which case it's only the fallback for a call past the end of that
+	// slice.
 	reply string
-	// toolCalls, if set, is returned as ChatResult.ToolCalls — set by
-	// tests simulating a model that called one of actionToolDefs, the
-	// same way a real provider's native tool-calling response would.
+	// toolCalls is returned as ChatResult.ToolCalls verbatim on every call
+	// — lets tests simulate a model that decided to call one of
+	// actionToolDefs. Only correct for a single-round scenario (the call
+	// never gets auto-executed, so the tool-execution loop — see
+	// runToolLoop in chatbot_tool_execution.go — never issues a second
+	// round); for a scenario where the model's tool call DOES get
+	// auto-executed, use roundToolCalls instead, or this fixed field would
+	// make every subsequent round see the exact same call again.
 	toolCalls []llm.ToolCall
+	// roundReplies/roundToolCalls, when set, provide per-call (round-
+	// indexed, first call = index 0) Content/ToolCalls instead of the
+	// fixed reply/toolCalls above — needed for any test where a tool call
+	// actually gets executed (the loop then issues a real second round,
+	// which must see different canned output or the fake would just
+	// repeat the same tool call forever, hitting the loop's round cap
+	// instead of resolving). A call past the end of roundToolCalls gets no
+	// tool calls (nil) — the natural "the model is done" signal.
+	roundReplies   []string
+	roundToolCalls [][]llm.ToolCall
+	// callCount is incremented on every Chat() call — read by tests that
+	// want to assert exactly how many round-trips the tool-execution loop
+	// made.
+	callCount int
 }
 
 func (f *fakeLLMClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResult, error) {
+	round := f.callCount
+	f.callCount++
 	f.lastMessages = req.Messages
 	f.lastTools = req.Tools
 	for _, m := range req.Messages {
@@ -78,10 +103,21 @@ func (f *fakeLLMClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.Chat
 		}
 	}
 	content := f.reply
+	if round < len(f.roundReplies) {
+		content = f.roundReplies[round]
+	}
 	if content == "" {
 		content = "fake answer"
 	}
-	return llm.ChatResult{Content: content, TokensIn: 10, TokensOut: 5, ToolCalls: f.toolCalls}, nil
+	calls := f.toolCalls
+	if f.roundToolCalls != nil {
+		if round < len(f.roundToolCalls) {
+			calls = f.roundToolCalls[round]
+		} else {
+			calls = nil
+		}
+	}
+	return llm.ChatResult{Content: content, ToolCalls: calls, TokensIn: 10, TokensOut: 5}, nil
 }
 
 func (f *fakeLLMClient) ChatStream(ctx context.Context, req llm.ChatRequest, onDelta func(string)) (llm.ChatResult, error) {

@@ -177,14 +177,19 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	// 120s (not the previous 30s): chat/RAG requests call out to an LLM
-	// provider — often a local Ollama instance running on CPU — and a
-	// cold model load or a long generation can legitimately take well
-	// over 30s without anything actually being wrong. The chatbot
-	// frontend never surfaces this value to the admin either way (see
-	// app.js's chat retry/error-hiding logic); it just gives slow-but-
-	// healthy requests enough room to finish instead of being cut off.
-	r.Use(middleware.Timeout(120 * time.Second))
+	// 240s (up from 120s): a document-summarize/chat request against a
+	// local, CPU-bound Ollama model can legitimately take several minutes
+	// for a large attachment or a multi-round tool-execution turn — 120s
+	// was cutting these off mid-generation with a bare timeout error and
+	// no partial content, the exact "Summarize times out" symptom this was
+	// raised against. Global (not chat-route-scoped) deliberately: chi's
+	// Timeout middleware sets a context deadline that can only ever shrink
+	// when nested, never extend, so carving out a longer per-route timeout
+	// would require restructuring the route tree into disjoint groups —
+	// real complexity for a problem a single larger number already
+	// solves. Every other route on this server completes in milliseconds
+	// regardless, so raising the ceiling costs them nothing.
+	r.Use(middleware.Timeout(240 * time.Second))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   s.cfg.CORSOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
@@ -286,6 +291,16 @@ func (s *Server) Router() http.Handler {
 			r.Use(s.requireAdminAuth)
 			r.Get("/export", s.handleExportBackup)
 			r.Post("/import", s.handleImportBackup)
+
+			// RC3: persisted backup history, alongside the one-shot
+			// export/import above (unchanged, still the classic
+			// dashboard's direct download/upload-restore path).
+			r.Post("/", s.handleCreateBackup)
+			r.Get("/", s.handleListBackups)
+			r.Get("/{id}/download", s.handleDownloadBackup)
+			r.Delete("/{id}", s.handleDeleteBackup)
+			r.Get("/{id}/preview", s.handlePreviewRestore)
+			r.Post("/{id}/restore", s.handleRestoreFromBackup)
 		})
 
 		r.Route("/settings", func(r chi.Router) {
