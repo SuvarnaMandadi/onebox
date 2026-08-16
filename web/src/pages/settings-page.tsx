@@ -90,7 +90,7 @@ export function SettingsPage() {
       if (validateTimer.current) clearTimeout(validateTimer.current)
       validateTimer.current = setTimeout(() => {
         validateSettings(candidate)
-          .then((res) => setIssues(res.issues))
+          .then((res) => setIssues(res.issues ?? []))
           .catch(() => {})
       }, 400)
     },

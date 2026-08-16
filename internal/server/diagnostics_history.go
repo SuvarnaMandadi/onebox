@@ -65,7 +65,13 @@ func listDiagnosticsHistory(ctx context.Context, sqlDB *sql.DB, provider string,
 	}
 	defer rows.Close()
 
-	var out []diagnosticsHistoryEntry
+	// Initialized non-nil so a provider with zero recorded runs (every
+	// provider on a fresh install) serializes as "items":[] rather than
+	// "items":null — matching validateSettingsStructural's issues and
+	// providerDiagnosticsReport.normalizeSlices' reasoning: the frontend
+	// always expects an array here, and nil vs. empty carries no extra
+	// meaning for "how many history rows exist."
+	out := []diagnosticsHistoryEntry{}
 	for rows.Next() {
 		var e diagnosticsHistoryEntry
 		var success int

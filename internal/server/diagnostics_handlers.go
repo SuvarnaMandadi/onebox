@@ -132,6 +132,7 @@ func (s *Server) handleProviderDiagnostics(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_body", `provider must be one of "ollama", "anthropic", "openai", "embedding"`, nil)
 		return
 	}
+	report.normalizeSlices()
 
 	if err := recordDiagnosticsRun(r.Context(), s.db, report); err != nil {
 		// Connection History is a nice-to-have, not load-bearing — a
@@ -293,7 +294,14 @@ func (s *Server) handleValidateSettings(w http.ResponseWriter, r *http.Request) 
 }
 
 func validateSettingsStructural(merged map[settingKey]string) []configIssue {
-	var issues []configIssue
+	// Initialized non-nil (not `var issues []configIssue`) so a
+	// perfectly valid configuration — the common case, e.g. an
+	// all-local Ollama chat+embedding setup — serializes as "issues":[]
+	// rather than "issues":null. There's no meaningful difference
+	// between "no problems found" and "no problems found", so nil vs.
+	// empty here is purely a Go idiom quirk, not API information; the
+	// frontend always expects an array to map/measure the length of.
+	issues := []configIssue{}
 	checkURL := func(key settingKey, label string) {
 		v := merged[key]
 		if v == "" {

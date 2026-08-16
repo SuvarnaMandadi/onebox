@@ -43,7 +43,13 @@ export function getPerformanceSummary(provider: string) {
 }
 
 export function validateSettings(candidate: Record<string, string>) {
-  return api.post<{ issues: ConfigIssue[]; valid: boolean }>("/api/settings/validate", candidate)
+  // issues is a Go slice that serializes as JSON null for a valid
+  // configuration with nothing to report (the common case) — never
+  // assume it's an array. The backend now normalizes this to [] (see
+  // validateSettingsStructural), but the type stays honest here as a
+  // second line of defense, matching every other list field in this
+  // API surface.
+  return api.post<{ issues: ConfigIssue[] | null; valid: boolean }>("/api/settings/validate", candidate)
 }
 
 export function getBackendHealth() {

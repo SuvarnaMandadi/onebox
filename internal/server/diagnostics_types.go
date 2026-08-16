@@ -194,6 +194,30 @@ type providerDiagnosticsReport struct {
 	Issues []diagnosticIssue `json:"issues,omitempty"`
 }
 
+// normalizeSlices guarantees Checks/Capabilities/Issues are never a nil
+// Go slice by the time this report is serialized. A nil slice and an
+// empty slice carry the exact same meaning for these three fields
+// (there is no "never checked" state distinct from "checked, found
+// none" — unlike, say, capabilitySource's live/known/unknown), but
+// encoding/json marshals a nil slice as JSON null and an empty slice as
+// [], so without this every diagnose* code path that returns before
+// appending anything (e.g. no API key configured) would silently hand
+// the frontend a null where it always expects an array. Called once,
+// centrally, in handleProviderDiagnostics — new diagnose* functions get
+// the guarantee for free instead of every call site having to remember
+// to initialize its own report literal correctly.
+func (r *providerDiagnosticsReport) normalizeSlices() {
+	if r.Checks == nil {
+		r.Checks = []checkResult{}
+	}
+	if r.Capabilities == nil {
+		r.Capabilities = []capability{}
+	}
+	if r.Issues == nil {
+		r.Issues = []diagnosticIssue{}
+	}
+}
+
 // diagnosticsHistoryEntry is one persisted row — Section 7's "Connection
 // History". Kept deliberately small (no full report body) — see
 // diagnostics_handlers.go's migration for why.
