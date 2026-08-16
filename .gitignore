@@ -7,3 +7,7 @@
 /onebox
 /onebox.exe
 onebox_data/
+onebox_data*/
+*.log
+onebox.exe~
+web/node_modules/

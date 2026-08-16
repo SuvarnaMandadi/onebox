@@ -12,8 +12,12 @@ kind of proposal/context reference.
 ## 1. Overall architecture
 
 onebox is a single Go binary: an HTTP API (chi router), SQLite (via the
-pure-Go `modernc.org/sqlite` driver, no cgo), and a dependency-free
-JS/HTML/CSS admin dashboard served via `go:embed` — no frontend build step.
+pure-Go `modernc.org/sqlite` driver, no cgo), and an admin dashboard served
+via `go:embed`. Two dashboards currently coexist during the Milestone 2
+frontend migration (see §1a): the original dependency-free JS/HTML/CSS one
+(no build step) at `/_/`, and a new React/Tailwind/shadcn-ui one (built with
+Vite, still embedded — Node is a build-time dependency only, never a
+runtime one) at `/app/`.
 
 ```mermaid
 flowchart LR
@@ -36,12 +40,37 @@ flowchart LR
 | `internal/db` | SQLite connection (DSN-embedded pragmas — see §9) + migrations |
 | `internal/auth` | JWT issue/parse, password hashing |
 | `internal/embeddings` | Embedding provider adapters for RAG |
-| `internal/webui` | `go:embed` of `static/{app.js,style.css,index.html}` |
+| `internal/webui` | `go:embed` of `static/{app.js,style.css,index.html}` — original dashboard, `/_/` |
+| `internal/webui/app` | `go:embed` of `dist/` (Vite build output of `/web`) — new dashboard, `/app/` |
 
 Every dynamic collection is a real SQLite table (`CREATE TABLE` per
 collection); `_collections` is the schema registry. This matters for the AI
 pipeline because collection/record context is always read live from these
 tables, never cached or duplicated.
+
+### 1a. Frontend migration (Milestone 2, in progress)
+
+The admin dashboard is being incrementally rewritten as a React SPA
+(Vite + TypeScript + Tailwind + shadcn/ui + Radix, source in `/web`,
+routing via react-router) and migrated feature by feature rather than in
+one cutover. Both dashboards call the exact same REST API — no backend
+changes are needed to support the new one, and none should be, beyond
+what an actual new UI feature requires.
+
+- `/web` — the React app. `npm run dev` for local dev (proxies `/api` to
+  `http://localhost:8090`, see `web/vite.config.ts`); `npm run build`
+  outputs to `internal/webui/app/dist`, which `go build` then embeds — so
+  `go build` alone never requires Node, only a rebuild of the frontend
+  does. `dist/` is committed so a fresh clone builds immediately.
+- `/_/` (`internal/webui`) stays canonical for any feature not yet
+  migrated; `/app/` (`internal/webui/app`) gains features one at a time.
+  `/_/` is retired only once `/app/` has full parity — see the migration
+  order in this repo's Milestone 2 task history: shell (sidebar/header/
+  routing/theme) → Dashboard → Collections → Records → AI Workspace →
+  Files → Settings.
+- Auth: `/app/` uses the same `POST /api/login` (unified admin/user
+  login) and `Authorization: Bearer <token>` scheme as the rest of the
+  API — no separate session mechanism.
 
 ## 2. AI pipeline (end to end)
 
@@ -417,13 +446,40 @@ Key functions (all in `app.js`):
 5. **M2 — AI Workspace (context chips)** — drag collections/records/files
    into chat, `@`/`#` mention autocomplete, explicit `context_refs` +
    `conversation_excerpts`, live chip previews for transparency.
+6. **AI Execution (bounded auto-execute + propose-for-destructive)** — the
+   single-call propose-only pipeline (#2/#3 above) is now a genuine
+   multi-round agentic loop: `(*Server).runToolLoop`
+   (`chatbot_tool_execution.go`) calls the provider with `actionToolDefs`,
+   executes every `autoExecutable` proposal for real
+   (`executeToolCall` → `createCollection`/`updateCollectionSchema`/
+   `listCollections`/the static `describe_onebox` answer — the same
+   data-layer functions a hand-typed API request uses), replays the
+   assistant's tool call(s) plus each result back to the model via each
+   provider's native tool-result wire format
+   (`llm.Message.ToolCalls`/`ToolCallID`), and loops (bounded by
+   `maxToolRounds`) until a round makes no further tool calls — that
+   round's `Content` is the only text any caller (streaming or not) ever
+   shows the admin. `autoExecutable` splits by safety, not just the
+   existing `Destructive` flag: `create_collection`/`add_field`/
+   `describe_onebox`/`list_collections` execute immediately;
+   `delete_collection`/`rename_collection`/`delete_field`/`update_schema`
+   (destructive) and `import_data` (no real primitive) stay propose-only
+   exactly as before, riding along in the response's `Actions` for the
+   admin to confirm from the dashboard. `capabilities.AIExecutionEnabled`
+   is now `true`, and `chatbotSystemPrompt`'s TRUTHFULNESS section was
+   updated to match: a safe tool's result is reported as a completed fact,
+   a destructive one is always reported as pending confirmation, never
+   guessed. The UI never receives raw tool-call JSON — only a round's
+   final natural-language `Content`.
 
 ## 14. Planned milestones
 
-- **AI Execution** — Approve → Execute a validated proposal, progress
-  updates, result reporting, rollback/error handling. The entire pipeline
-  in §4–§5 was explicitly designed for this: `Type` + `Payload` are
-  already exactly what an executor needs.
+- **AI Execution, continued** — an explicit Approve/Reject UI for the
+  propose-only actions still riding along in `Actions` (destructive
+  operations, `import_data`, anything that fails auto-execution) —
+  `renderActionCard` in `app.js` already exists but its Approve button is
+  still deliberately disabled; progress updates, result reporting, and
+  rollback/error handling for that approval flow are not built yet.
 - **AI Workspace, continued** — Memories, custom AI agents, MCP
   integration, a plugin/tool ecosystem (tool-calling's provider-agnostic
   `Tool` abstraction is the natural seam for MCP-sourced tools).

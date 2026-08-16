@@ -96,11 +96,16 @@ for the pitch and scope.
 | `_collections` | Registry of user-defined collections, schema, access rules |
 | `_files` | File metadata |
 | `_rag_sources` | Ingested documents |
-| `_rag_chunks` | Text chunks + embeddings (sqlite-vec) |
+| `_rag_chunks` | Text chunks + embeddings (Go-side cosine similarity — sqlite-vec was skipped, see decision above) |
 | `_usage` | Every LLM/embedding call: tokens, cost, cache status |
 | `_settings` | Provider API keys (encrypted), limits, config |
 
 ## Reference: API surface (v0.1)
+
+This table is the original v0.1 plan, kept as-written for history — it predates
+the AI tool-execution/proposal system, relation fields, and the React admin
+dashboard, all shipped since. See [CHANGELOG.md](CHANGELOG.md) for what's
+actually in the current build.
 
 - `POST /api/auth/signup`, `POST /api/auth/login`, `GET /api/auth/oauth/:provider`
 - `GET|POST /api/collections/:name/records`, `GET|PATCH|DELETE /api/collections/:name/records/:id`

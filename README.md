@@ -58,6 +58,20 @@ job application from an uploaded resume:
 | ![Account page](docs/img/dashboard-account-light.png) | ![Sign up page](docs/img/dashboard-signup-light.png) |
 | ![Emergency Kit: 12-word recovery phrase shown once at signup](docs/img/emergency-kit-light.png) | ![Sidebar for a regular user, with admin-only items shown locked rather than hidden](docs/img/sidebar-locked-light.png) |
 
+## AI Workspace
+
+Beyond the REST API, onebox ships an in-dashboard AI assistant that can see
+and act on your actual workspace — not just answer questions about it. Ask
+it to find duplicate records, summarize an uploaded file, or create a new
+collection, and it plans a sequence of tool calls (read a collection, read
+records, propose a schema change), executes the safe ones automatically,
+and asks for confirmation before anything destructive. Collections can also
+declare `relation` fields pointing at another collection — the assistant
+follows them ("find this order's customer," "every order for this
+customer") the same way a human would click through. A `Ctrl+K` command
+palette gives keyboard-driven search across collections, records, files,
+and chats from anywhere in the app.
+
 ## Quickstart
 
 ```bash
@@ -65,7 +79,10 @@ go build -o onebox ./cmd/onebox
 ./onebox
 ```
 
-Then open `http://localhost:8090/_/` for the admin dashboard. See
+Then open `http://localhost:8090/app/` for the current dashboard (records,
+files, the AI Workspace, relations, universal search) — or
+`http://localhost:8090/_/` for the original classic dashboard, which still
+owns provider-key/settings configuration for now. See
 [docs/quickstart.md](docs/quickstart.md) for the full two-minute walkthrough
 (bootstrap admin → set provider keys → upload a PDF → get a grounded answer),
 or [docs/tutorial-chat-with-your-docs.md](docs/tutorial-chat-with-your-docs.md)
@@ -141,11 +158,12 @@ separate product with its own backend:
 ## Scope (v0.1)
 
 - **Core server** — single Go binary, HTTP server, config, migrations, admin dashboard
-- **Data** — collections (tables) with typed fields, CRUD REST API, realtime subscriptions
+- **Data** — collections (tables) with typed fields (including `relation` fields between collections), CRUD REST API, realtime subscriptions
 - **Auth** — email/password, JWT sessions, per-collection access rules (public/authenticated/owner)
 - **Files** — upload, store, serve files (local disk)
 - **RAG engine** — ingest PDF/TXT/MD/DOCX, chunk, embed, brute-force cosine-similarity search (see [ROADMAP.md](ROADMAP.md) for why not sqlite-vec)
 - **LLM gateway** — provider-agnostic `/api/llm/chat` (Anthropic, OpenAI, Ollama), streaming, caching, per-user rate/spend limits, usage logging
+- **AI Workspace** — an in-dashboard assistant with multi-step tool execution (read collections/records, propose or auto-run safe schema changes), relation-aware reasoning, and a human-readable activity log — never raw provider payloads
 
 ## Explicitly out of scope for v0.1
 
@@ -153,6 +171,11 @@ No custom storage engine, no clustering/replication, no Postgres/MySQL backend,
 no custom model training, no GraphQL/gRPC, no plugin marketplace, no SSO/SAML.
 SQLite + single node + REST/SSE only. See [ROADMAP.md](ROADMAP.md) for the full
 anti-scope list and rationale.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup, verification
+commands, and PR checklist.
 
 ## License
 

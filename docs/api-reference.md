@@ -28,8 +28,11 @@ Base URL: wherever you run onebox, e.g. `http://localhost:8090`.
 | `/api/collections/:name` | GET | admin | — |
 | `/api/collections/:name` | DELETE | admin | — |
 
-Field `type` is one of `text`, `number`, `bool`, `date`, `json`. `rules`
-sets `list`/`view`/`create`/`update`/`delete` each to `public`,
+Field `type` is one of `text`, `number`, `bool`, `date`, `json`, `relation`.
+A `relation` field also requires `relation_collection` (the target
+collection's name); its value is the id of a record in that collection,
+validated to actually exist on every write. `rules` sets
+`list`/`view`/`create`/`update`/`delete` each to `public`,
 `authenticated`, or `owner` (default: authenticated, except
 update/delete which default to owner). Admins always bypass rules.
 
@@ -45,6 +48,22 @@ update/delete which default to owner). Admins always bypass rules.
 
 List query params: `filter=field=value,field2=value2` (equality, ANDed),
 `sort=created` or `sort=-created` (default), `limit`, `cursor`.
+
+## AI chat
+
+| Endpoint | Method | Auth | Notes |
+|---|---|---|---|
+| `/api/chat` | POST | admin | Streams (SSE) or returns a full reply; supports multi-round tool execution (see [ARCHITECTURE.md](../ARCHITECTURE.md)) |
+| `/api/admins/chat-share` | GET/POST | admin | Enable/disable/regenerate a public, unauthenticated share link for a read-only, tool-free chat |
+| `/chat/:token` | GET | none | The public share link's page |
+| `/api/chat/:token` | POST | none | The public share link's chat endpoint — no tool execution, workspace-scoped answers only |
+
+## Admin management
+
+`/api/admins/*` covers bootstrap signup/login plus `list`/`promote`/`demote`/`me`
+(profile + avatar) — admin-only except the one-time bootstrap signup before any
+admin exists. `/api/setup-status` (no auth) reports whether that bootstrap has
+happened yet, for the dashboard's first-run flow.
 
 ## Files
 
