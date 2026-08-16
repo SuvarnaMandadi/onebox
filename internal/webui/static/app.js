@@ -8,7 +8,16 @@ const THEME_KEY = "onebox_theme";
 // Tokens live in localStorage (survives browser restarts) when the user
 // checked "Remember me" at login, sessionStorage (cleared when the tab/
 // browser closes) otherwise — read checks both since either may hold it.
-function getToken() { return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || ""; }
+//
+// Final fallback reads the React dashboard's (/app/) token key. The two
+// UIs authenticate against the same backend and already share the
+// "onebox_role" key verbatim (see ROLE_KEY above and web/src/lib/auth.tsx),
+// but historically stored the token itself under different names — so an
+// admin already signed into /app/ who clicked "Open classic settings" (or
+// any other /_/ link) hit a second, redundant login screen for the exact
+// same session. Falling back here closes that gap without touching how
+// either UI writes its own token.
+function getToken() { return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem("onebox_token") || ""; }
 function setToken(t, remember = true) {
   (remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, t);
   (remember ? sessionStorage : localStorage).removeItem(TOKEN_KEY);
@@ -774,20 +783,114 @@ fetch("/api/health")
     }
   }
 
-  // -- future architecture stub ----------------------------------------------
-  // No backend execution exists yet (see chatbot_context.go's proposedAction
-  // doc comment) — this gives the widget a concrete place to render an
-  // "action card" (proposed change + Approve/Reject) the moment execution
-  // lands, instead of that feature inventing message-rendering plumbing from
-  // scratch. Not called by anything today.
+  // -- Proposal Cards ---------------------------------------------------------
+  // RC4: renders a proposedAction the model called but autoExecutable
+  // (chatbot_tool_execution.go) did NOT run automatically — either
+  // destructive (needs confirmation) or with no execution primitive on the
+  // backend at all (see notExecutedResult). Mirrors the React AI
+  // Workspace's ProposalCard (web/src/components/ai/proposal-card.tsx):
+  // delete_collection/delete_field genuinely execute here, by calling the
+  // exact same DELETE/PATCH endpoints a hand-typed request would hit —
+  // never a separate "approve" endpoint, since none exists (see
+  // chatbot_context.go's proposedAction doc comment for why). Every other
+  // type stays honest about not being executable from chat yet. Previously
+  // a permanently-disabled stub ("Not called by anything today") — the
+  // classic dashboard's chat panel silently dropped every proposal it got
+  // back from /api/chat, so a destructive action the model proposed had no
+  // way to actually happen from here at all, unlike the React dashboard.
   function renderActionCard(action) {
+    const payload = action.payload || {};
+    let done = false;
+
+    const buttons = el("div", { class: "chatbot-action-buttons" });
+    const errorLine = el("div", { class: "chatbot-action-error hidden" });
+
+    function markDone(successMessage) {
+      done = true;
+      clear(buttons);
+      buttons.appendChild(el("span", { class: "chatbot-action-done", text: "✓ Done" }));
+      toastSuccess(successMessage);
+    }
+    function markFailed(err) {
+      errorLine.textContent = err instanceof Error ? err.message : String(err);
+      errorLine.classList.remove("hidden");
+    }
+
+    if (action.type === "delete_collection" && payload.name) {
+      const btn = el("button", { type: "button", class: "btn btn-sm btn-danger", text: "Confirm delete" });
+      btn.addEventListener("click", async () => {
+        const ok = await confirmDialog(`Delete collection "${payload.name}"? This permanently deletes it and every record in it.`, "Delete");
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+          await api("/api/collections/" + encodeURIComponent(payload.name), { method: "DELETE" });
+          markDone(`Deleted collection "${payload.name}"`);
+        } catch (err) {
+          btn.disabled = false;
+          markFailed(err);
+        }
+      });
+      buttons.appendChild(btn);
+    } else if (action.type === "delete_field" && payload.collection && payload.field) {
+      const btn = el("button", { type: "button", class: "btn btn-sm btn-danger", text: "Confirm delete field" });
+      btn.addEventListener("click", async () => {
+        const ok = await confirmDialog(`Delete field "${payload.field}" from "${payload.collection}"? This deletes that field's data for every record.`, "Delete");
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+          const col = await api("/api/collections/" + encodeURIComponent(payload.collection));
+          const fields = (col.schema.fields || []).filter((f) => f.name !== payload.field);
+          await api("/api/collections/" + encodeURIComponent(payload.collection), { method: "PATCH", body: JSON.stringify({ fields }) });
+          markDone(`Removed field "${payload.field}" from "${payload.collection}"`);
+        } catch (err) {
+          btn.disabled = false;
+          markFailed(err);
+        }
+      });
+      buttons.appendChild(btn);
+    } else {
+      buttons.appendChild(el("span", {
+        class: "chatbot-action-nohandler",
+        text: action.destructive
+          ? "Needs confirmation, but OneBox doesn't execute this type from chat yet — do it from the collection page."
+          : "Not executed — do it from the collection page.",
+      }));
+    }
+
+    const collectionLink = typeof payload.collection === "string" ? payload.collection : typeof payload.name === "string" ? payload.name : null;
+    if (collectionLink) {
+      buttons.appendChild(el("a", { href: "#/records/" + encodeURIComponent(collectionLink), class: "btn btn-sm btn-secondary", text: "Open " + collectionLink }));
+    }
+
     return el("div", { class: "chatbot-action-card" + (action.destructive ? " destructive" : "") }, [
+      el("div", { class: "chatbot-proposal-eyebrow", text: "Proposal" }),
+      el("div", { class: "chatbot-action-header" }, [
+        el("span", { class: "chatbot-action-title", text: action.title }),
+        action.destructive ? el("span", { class: "chatbot-action-destructive-badge", text: "Destructive" }) : null,
+      ].filter(Boolean)),
       el("div", { class: "chatbot-action-desc", text: action.description }),
-      el("div", { class: "chatbot-action-buttons" }, [
-        el("button", { type: "button", class: "btn btn-sm", text: "Approve" }),
-        el("button", { type: "button", class: "btn btn-sm btn-secondary", text: "Reject" }),
-      ]),
+      buttons,
+      errorLine,
     ]);
+  }
+
+  // actionsNode/appendActionsIfAny split the same way attachments do: one
+  // path renders inline during buildMessageNode (history replay, or a
+  // reply that never streamed at all — actions are already known by the
+  // time the node is first built), the other appends post-hoc once a
+  // streaming reply's node already exists on screen before its actions
+  // arrive on the final SSE event (see runTurn).
+  function actionsNode(msg) {
+    if (!msg.actions || !msg.actions.length) return null;
+    const wrap = el("div", { class: "chatbot-actions-container" });
+    msg.actions.forEach((a) => wrap.appendChild(renderActionCard(a)));
+    return wrap;
+  }
+  function appendActionsIfAny(node, msg) {
+    const wrap = actionsNode(msg);
+    if (!wrap) return;
+    const timeEl = node.querySelector(".chatbot-msg-time");
+    if (timeEl) node.insertBefore(wrap, timeEl); else node.appendChild(wrap);
   }
 
   // -- message rendering: keyed, append-only — no full-log rerender per msg -
@@ -815,7 +918,10 @@ fetch("/api/health")
       msg.attachments.forEach((att) => row.appendChild(attachmentChipNode(att, false)));
       children.push(row);
     }
-    children.push(bubbleContent, el("div", { class: "chatbot-msg-time", text: formatTime(msg.ts) }));
+    children.push(bubbleContent);
+    const actions = actionsNode(msg);
+    if (actions) children.push(actions);
+    children.push(el("div", { class: "chatbot-msg-time", text: formatTime(msg.ts) }));
     return el("div", { class: "chatbot-msg " + msg.role }, children);
   }
   // updateMessageContent re-renders an already-appended message's bubble in
@@ -1162,7 +1268,7 @@ fetch("/api/health")
       }
       const reply = isJSON && body && body.reply ? body.reply : "";
       if (reply) onDelta(reply);
-      return reply;
+      return { text: reply, actions: (isJSON && body && body.actions) || [], executedActions: (isJSON && body && body.executed_actions) || [] };
     }
 
     const reader = res.body.getReader();
@@ -1170,6 +1276,8 @@ fetch("/api/health")
     let buffer = "";
     let full = "";
     let sawError = false;
+    let actions = [];
+    let executedActions = [];
 
     for (;;) {
       const { done, value } = await reader.read();
@@ -1188,12 +1296,22 @@ fetch("/api/health")
           onDelta(payload.delta);
         } else if (payload.error) {
           sawError = true;
+        } else if (payload.done) {
+          // Proposal Cards (payload.actions) and the Activity Panel feed
+          // (payload.executed_actions) both ride on this same final event —
+          // see streamDoneEvent's doc comment (chatbot_handlers.go). Kept
+          // as plain locals rather than pushed straight onto the message
+          // here since the caller (runTurn) is the one that knows whether
+          // this turn's message node already exists (mid-stream) or still
+          // needs to be created.
+          actions = payload.actions || [];
+          executedActions = payload.executed_actions || [];
         }
       }
     }
 
     if (sawError && !full) throw new Error("stream ended with no content");
-    return full;
+    return { text: full, actions, executedActions };
   }
 
   // Never lets a raw backend/network error reach the UI: logs it to the
@@ -1245,17 +1363,26 @@ fetch("/api/health")
     }
 
     try {
-      const reply = await sendWithRetry(conv, userMsg, handleDelta);
+      const result = await sendWithRetry(conv, userMsg, handleDelta);
       setTyping(false);
+      assistantMsg.actions = result.actions || [];
       if (!node) {
         // Nothing streamed in (non-streaming fallback path, or a reply
         // that arrived as a single chunk) — render it now, same as the
-        // old non-streaming flow always did.
-        assistantMsg.content = reply;
+        // old non-streaming flow always did. assistantMsg.actions is
+        // already set, so buildMessageNode renders any Proposal Cards on
+        // this same first pass.
+        assistantMsg.content = result.text;
         node = appendMessage(assistantMsg);
-      } else if (reply && reply !== assistantMsg.content) {
-        assistantMsg.content = reply;
-        updateMessageContent(node, assistantMsg);
+      } else {
+        // The node was already on screen from streaming deltas, before
+        // actions were known (they only ride on the final SSE event) — add
+        // them now rather than rebuilding the whole node.
+        if (result.text && result.text !== assistantMsg.content) {
+          assistantMsg.content = result.text;
+          updateMessageContent(node, assistantMsg);
+        }
+        appendActionsIfAny(node, assistantMsg);
       }
       conv.messages.push(assistantMsg);
       conv.updatedAt = Date.now();
@@ -3983,6 +4110,8 @@ async function renderBackups(container) {
     ])
   );
 
+  container.appendChild(await renderBackupHistoryCard());
+
   const collectionsCard = el("div", { class: "col" }, [el("p", { class: "muted", text: "Loading collections…" })]);
   container.appendChild(el("div", { class: "card" }, [cardTitle("collections", "Per-collection export / import"), collectionsCard]));
 
@@ -3996,6 +4125,131 @@ async function renderBackups(container) {
   for (const c of items) {
     collectionsCard.appendChild(renderCollectionBackupRow(c));
   }
+}
+
+// renderBackupHistoryCard (RC3): the persisted backup history — create,
+// list, download, restore-preview, restore, delete — around the same
+// snapshot/restore primitives the "Full backup" card above already uses.
+// Rebuilds itself in place after any action rather than a full page
+// re-render, same lightweight pattern renderCollectionBackupRow's mapping
+// area already uses.
+async function renderBackupHistoryCard() {
+  const listArea = el("div", { class: "col" }, [el("p", { class: "muted", text: "Loading backup history…" })]);
+
+  const createBtn = actionButton("Create backup now", {}, async () => {
+    await api("/api/backups", { method: "POST" });
+    toastSuccess("Backup created");
+    await refreshList();
+  });
+
+  const cardEl = el("div", { class: "card" }, [
+    el("div", { class: "row", style: "justify-content:space-between" }, [cardTitle("backups", "Backup history"), createBtn]),
+    el("p", { class: "muted", text: "Every backup created here (manually, or automatically if scheduled) stays listed below until you delete it." }),
+    listArea,
+  ]);
+
+  async function refreshList() {
+    clear(listArea);
+    let resp;
+    try {
+      resp = await api("/api/backups");
+    } catch (e) {
+      listArea.appendChild(el("p", { class: "error-text", text: e.message }));
+      return;
+    }
+    const items = resp.items || [];
+    if (items.length === 0) {
+      listArea.appendChild(el("p", { class: "muted", text: "No backups yet." }));
+      return;
+    }
+    for (const b of items) {
+      listArea.appendChild(renderBackupRow(b, refreshList));
+    }
+  }
+
+  await refreshList();
+  return cardEl;
+}
+
+function renderBackupRow(b, refreshList) {
+  const status = el("div", { class: "error-text" });
+  const previewArea = el("div", { class: "hidden col" });
+
+  const badge = b.status === "complete" ? "" : ` (${b.status}${b.error ? ": " + b.error : ""})`;
+  const label = el("span", { text: `${b.filename}${badge} — ${formatBytes(b.size_bytes)} · ${b.trigger} · ${new Date(b.created).toLocaleString()}` });
+
+  const downloadBtn = actionButton("Download", { class: "btn-secondary" }, () => downloadAuthed("/api/backups/" + b.id + "/download", b.filename));
+
+  const previewBtn = actionButton("Preview restore…", { class: "btn-secondary" }, async () => {
+    clear(status);
+    clear(previewArea);
+    previewArea.classList.remove("hidden");
+    previewArea.appendChild(el("p", { class: "muted", text: "Loading preview…" }));
+    let preview;
+    try {
+      preview = await api("/api/backups/" + b.id + "/preview");
+    } catch (e) {
+      clear(previewArea);
+      previewArea.appendChild(el("p", { class: "error-text", text: e.message }));
+      return;
+    }
+    clear(previewArea);
+    const rows = (preview.tables_to_restore || []).map((t) =>
+      el("div", { class: "row", style: "justify-content:space-between;max-width:420px" }, [
+        el("span", { text: t.table }),
+        el("span", { class: "muted", text: `${t.live_row_count} row(s) now -> ${t.backup_row_count} row(s) in backup` }),
+      ])
+    );
+    const skipped = preview.tables_skipped || [];
+    previewArea.appendChild(
+      el("div", { class: "col", style: "margin-top:8px" }, [
+        el("div", { class: "muted", text: "Restoring will replace these tables' data:" }),
+        ...rows,
+        skipped.length
+          ? el("div", { class: "muted", text: "Skipped (not in this instance's current schema): " + skipped.join(", ") })
+          : null,
+        el("div", { class: "muted", text: (preview.files_in_backup || 0) + " file(s) in this backup." }),
+        actionButton("Restore this backup", { class: "btn-danger", loadingLabel: "Restoring..." }, async () => {
+          const ok = await confirmDialog(
+            "Restore will overwrite existing data in every collection listed above. This cannot be undone. Continue?",
+            "Restore"
+          );
+          if (!ok) return;
+          try {
+            const summary = await api("/api/backups/" + b.id + "/restore", { method: "POST" });
+            toastSuccess(`Restored ${summary.tables_restored ? summary.tables_restored.length : 0} table(s), ${summary.files_restored || 0} file(s)`);
+            previewArea.classList.add("hidden");
+          } catch (e) {
+            status.textContent = e.message;
+            throw e;
+          }
+        }),
+      ].filter(Boolean))
+    );
+  });
+
+  const deleteBtn = actionButton("Delete", { class: "btn-danger" }, async () => {
+    const ok = await confirmDialog(`Delete backup "${b.filename}"? This can't be undone.`, "Delete");
+    if (!ok) return;
+    try {
+      await api("/api/backups/" + b.id, { method: "DELETE" });
+      toastSuccess("Backup deleted");
+      await refreshList();
+    } catch (e) {
+      status.textContent = e.message;
+      throw e;
+    }
+  });
+
+  const actions = [downloadBtn];
+  if (b.status === "complete") actions.push(previewBtn);
+  actions.push(deleteBtn);
+
+  return el("div", { class: "col", style: "padding:8px 0;border-top:1px solid var(--border)" }, [
+    el("div", { class: "row", style: "justify-content:space-between;flex-wrap:wrap" }, [label, el("div", { class: "row" }, actions)]),
+    status,
+    previewArea,
+  ]);
 }
 
 function renderCollectionBackupRow(c) {

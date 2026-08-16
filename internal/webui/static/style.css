@@ -1251,9 +1251,11 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
 /* -- Proposal Cards (see renderActionCard in app.js / proposedAction in
    chatbot_context.go) — validated, structured proposals below an
    assistant message ("Proposal" is the user-facing term; class names
-   below stay "action" internally to avoid renaming churn). No execution
-   exists yet: the control at the bottom of every card is permanently
-   disabled and reads "Waiting for approval." -- */
+   below stay "action" internally to avoid renaming churn). RC4: real
+   execution for delete_collection/delete_field (the same DELETE/PATCH
+   calls the collection page's own delete UI makes); every other type
+   shows an honest "not executable from chat yet" note instead of a
+   disabled button — see renderActionCard's doc comment. -- */
 .chatbot-actions-container:empty { display: none; }
 .chatbot-action-card {
   border: 1px solid var(--border);
@@ -1288,12 +1290,12 @@ code { background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px
 .chatbot-action-fields-label { font-size: 0.75rem; color: var(--text-muted); margin-top: var(--space-1); }
 .chatbot-action-fields-list { margin: var(--space-1) 0 var(--space-2); padding-left: 1.1em; font-size: 0.82rem; }
 .chatbot-action-fields-list li { color: var(--text-secondary); }
-.chatbot-action-buttons { display: flex; gap: var(--space-2); }
-.chatbot-action-buttons button {
-  font-size: 0.78rem;
-  cursor: not-allowed;
-  opacity: 0.7;
-}
+.chatbot-action-buttons { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.chatbot-action-buttons button, .chatbot-action-buttons .btn { font-size: 0.78rem; }
+.chatbot-action-nohandler { display: flex; align-items: center; gap: 0.4em; font-size: 0.78rem; color: var(--text-muted); }
+.chatbot-action-done { font-size: 0.82rem; font-weight: 600; color: var(--success, #1a7f37); }
+.chatbot-action-error { font-size: 0.78rem; color: var(--danger-strong); margin-top: var(--space-1); }
+.chatbot-action-error.hidden { display: none; }
 
 .chatbot-form {
   display: flex;
