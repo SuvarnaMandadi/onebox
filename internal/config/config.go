@@ -11,6 +11,13 @@ import (
 
 const defaultMaxUploadSize = 20 * 1024 * 1024 // 20 MiB
 
+// defaultJWTSecret is the fallback used when ONEBOX_JWT_SECRET is unset —
+// deliberately public (it's right here in the source, which anyone
+// deploying onebox can read) and deliberately never blocking startup: a
+// fresh local dev/CI checkout must keep working with zero configuration.
+// See Load's doc comment for why this being unchanged is loud, not silent.
+const defaultJWTSecret = "dev-insecure-secret-change-me"
+
 type Config struct {
 	// Addr is the host:port the HTTP server listens on.
 	Addr string
@@ -21,8 +28,16 @@ type Config struct {
 	DBPath string
 	// FilesDir holds uploaded file contents.
 	FilesDir string
-	// JWTSecret signs auth session tokens.
+	// JWTSecret signs auth session tokens, and (see settings_crypto.go's
+	// settingsKey) also derives the AES-256 key that encrypts provider API
+	// keys at rest — one secret backs both.
 	JWTSecret string
+	// JWTSecretIsDefault reports whether JWTSecret is still defaultJWTSecret
+	// because ONEBOX_JWT_SECRET was never set — cmd/onebox/main.go logs a
+	// loud startup warning off this rather than the caller re-deriving the
+	// same comparison (or, worse, hardcoding defaultJWTSecret's literal
+	// value a second time).
+	JWTSecretIsDefault bool
 	// MaxUploadSize is the largest file, in bytes, /api/files will accept.
 	MaxUploadSize int64
 
@@ -67,9 +82,31 @@ type Config struct {
 
 	// RateLimitPerMinute caps chat requests per user per minute.
 	RateLimitPerMinute int
+	// AuthRateLimitPerMinute caps unauthenticated auth-endpoint requests
+	// (login/signup/password-reset, both _users and _admins) per source IP
+	// per minute — a brute-force/credential-stuffing guard. Unlike
+	// RateLimitPerMinute (keyed per authenticated user), this has to be
+	// keyed by IP since there's no user identity yet on these routes.
+	AuthRateLimitPerMinute int
 	// MonthlySpendCapUSD caps a user's estimated monthly LLM spend; 0
 	// means unlimited.
 	MonthlySpendCapUSD float64
+
+	// BackupIntervalHours, when > 0, starts a background scheduler (see
+	// startBackupScheduler in backups.go) that creates a full backup on
+	// this interval — 0 (the default) means scheduled backups are off,
+	// since silently writing snapshots to disk on a fresh install with no
+	// retention awareness would be a surprising default, not a helpful
+	// one. Manual backups (POST /api/backups) work regardless of this
+	// setting.
+	BackupIntervalHours int
+	// BackupRetentionCount bounds how many backups (manual + scheduled
+	// combined) are kept on disk — the oldest are deleted past this count,
+	// checked after every backup a scheduled run creates. A manual backup
+	// never gets auto-deleted by retention on its own action, only as the
+	// oldest row once the count is exceeded by a later backup, same as any
+	// other backup.
+	BackupRetentionCount int
 
 	// CORSOrigins is who may call the API from a browser. onebox is a
 	// backend *for* other frontends (a separate dev server, a static
@@ -89,7 +126,7 @@ type Config struct {
 // development defaults for anything unset.
 func Load() Config {
 	dataDir := getEnv("ONEBOX_DATA_DIR", "./onebox_data")
-	secret := getEnv("ONEBOX_JWT_SECRET", "dev-insecure-secret-change-me")
+	secret := getEnv("ONEBOX_JWT_SECRET", defaultJWTSecret)
 
 	maxUpload := int64(defaultMaxUploadSize)
 	if raw := os.Getenv("ONEBOX_MAX_UPLOAD_SIZE"); raw != "" {
@@ -99,12 +136,13 @@ func Load() Config {
 	}
 
 	return Config{
-		Addr:          getEnv("ONEBOX_ADDR", ":8090"),
-		DataDir:       dataDir,
-		DBPath:        filepath.Join(dataDir, "data.db"),
-		FilesDir:      filepath.Join(dataDir, "files"),
-		JWTSecret:     secret,
-		MaxUploadSize: maxUpload,
+		Addr:               getEnv("ONEBOX_ADDR", ":8090"),
+		DataDir:            dataDir,
+		DBPath:             filepath.Join(dataDir, "data.db"),
+		FilesDir:           filepath.Join(dataDir, "files"),
+		JWTSecret:          secret,
+		JWTSecretIsDefault: secret == defaultJWTSecret,
+		MaxUploadSize:      maxUpload,
 
 		EmbeddingProvider: getEnv("ONEBOX_EMBEDDING_PROVIDER", "openai"),
 		EmbeddingBaseURL:  os.Getenv("ONEBOX_EMBEDDING_BASE_URL"),
@@ -122,8 +160,12 @@ func Load() Config {
 		ChatProvider: getEnv("ONEBOX_CHAT_PROVIDER", "ollama"),
 		ChatModel:    os.Getenv("ONEBOX_CHAT_MODEL"),
 
-		RateLimitPerMinute: getEnvInt("ONEBOX_RATE_LIMIT_PER_MINUTE", 20),
-		MonthlySpendCapUSD: getEnvFloat("ONEBOX_MONTHLY_SPEND_CAP_USD", 5.0),
+		RateLimitPerMinute:     getEnvInt("ONEBOX_RATE_LIMIT_PER_MINUTE", 20),
+		AuthRateLimitPerMinute: getEnvInt("ONEBOX_AUTH_RATE_LIMIT_PER_MINUTE", 10),
+		MonthlySpendCapUSD:     getEnvFloat("ONEBOX_MONTHLY_SPEND_CAP_USD", 5.0),
+
+		BackupIntervalHours:  getEnvInt("ONEBOX_BACKUP_INTERVAL_HOURS", 0),
+		BackupRetentionCount: getEnvInt("ONEBOX_BACKUP_RETENTION_COUNT", 10),
 
 		CORSOrigins: getEnvList("ONEBOX_CORS_ORIGINS", []string{"*"}),
 	}
