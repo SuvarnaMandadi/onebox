@@ -89,6 +89,22 @@ func (s *Server) requireAnyAuth(next http.Handler) http.Handler {
 	})
 }
 
+// rateLimitByIP throttles pre-auth endpoints (login/signup/password-reset)
+// by source IP via authRateLimiter, since there's no authenticated user
+// identity yet to key on at this point — a brute-force/credential-stuffing
+// guard, distinct from rateLimiter's per-user chat throttling. Reuses
+// clientIP (rate_limiter.go) rather than a second RemoteAddr-parsing
+// helper.
+func (s *Server) rateLimitByIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.authRateLimiter.Allow(clientIP(r)) {
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests, slow down", nil)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "

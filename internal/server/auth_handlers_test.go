@@ -14,6 +14,19 @@ import (
 
 func newTestServer(t *testing.T) (*Server, *sql.DB) {
 	t.Helper()
+	cfg := config.Config{JWTSecret: "test-secret"}
+	return newTestServerWithConfig(t, cfg)
+}
+
+// newTestServerWithConfig is newTestServer with a caller-supplied Config —
+// for tests (see TestSignupRateLimited/TestLoginRateLimited below, mirroring
+// TestLLMChatRateLimit's newLLMTestServer(t, config.Config{...}) pattern in
+// llm_handlers_test.go) that need a non-default RateLimitPerMinute. Every
+// other newTestServer caller keeps getting RateLimitPerMinute's zero value,
+// which rateLimiter.Allow treats as unlimited — so this doesn't change any
+// existing test's behavior.
+func newTestServerWithConfig(t *testing.T, cfg config.Config) (*Server, *sql.DB) {
+	t.Helper()
 	sqlDB, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -23,7 +36,18 @@ func newTestServer(t *testing.T) (*Server, *sql.DB) {
 	}
 	t.Cleanup(func() { sqlDB.Close() })
 
-	cfg := config.Config{JWTSecret: "test-secret"}
+	if cfg.JWTSecret == "" {
+		cfg.JWTSecret = "test-secret"
+	}
+	if cfg.MaxUploadSize == 0 {
+		// Mirrors config.Load()'s own real-world default (20 MiB) — without
+		// this, every MaxBytesReader-wrapped handler (see Fix 6's
+		// parseImportFile) would reject any non-empty body outright, since
+		// the zero value of int64 is 0 bytes allowed. A test that
+		// specifically wants to exercise a tiny cap still can, by setting
+		// MaxUploadSize explicitly (see newTestServerWithFiles).
+		cfg.MaxUploadSize = 20 << 20
+	}
 	return New(cfg, sqlDB), sqlDB
 }
 
@@ -216,5 +240,56 @@ func TestLoginMixedCaseEmail(t *testing.T) {
 				t.Fatal("expected non-empty token")
 			}
 		})
+	}
+}
+
+// TestLoginRateLimited is the brute-force-protection regression test
+// (security-audit Fix 3): POST /api/auth/login had no rate limiting at
+// all, so a script could try passwords indefinitely. It now goes through
+// the rateLimitByIP middleware (server.go's route wiring), backed by its
+// own authRateLimiter budget — separate from rateLimiter's per-user chat/
+// LLM throttling — this pins that a caller past the limit gets 429
+// rate_limited, the same shape the LLM gateway already returns.
+func TestLoginRateLimited(t *testing.T) {
+	// AuthRateLimitPerMinute: 2, not 1 — the seed signup call below also
+	// goes through the same authRateLimiter (see TestSignupRateLimited),
+	// and it shares the same remote IP as the two login attempts that
+	// follow (httptest requests all default to the same RemoteAddr), so a
+	// limit of 1 would already be exhausted before the login attempts even
+	// start.
+	srv, _ := newTestServerWithConfig(t, config.Config{AuthRateLimitPerMinute: 2})
+	doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "brute@example.com", Password: "hunter22222"})
+
+	first := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "brute@example.com", Password: "wrong-password"})
+	if first.Code != http.StatusUnauthorized {
+		t.Fatalf("first login attempt: status = %d, want 401, body = %s", first.Code, first.Body.String())
+	}
+
+	second := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "brute@example.com", Password: "hunter22222"})
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second login attempt (over the limit): status = %d, want 429, body = %s", second.Code, second.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal(second.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if env.Code != "rate_limited" {
+		t.Fatalf("code = %q, want %q", env.Code, "rate_limited")
+	}
+}
+
+// TestSignupRateLimited is TestLoginRateLimited's counterpart for
+// POST /api/auth/signup — the same brute-force/spam surface Fix 3 covers.
+func TestSignupRateLimited(t *testing.T) {
+	srv, _ := newTestServerWithConfig(t, config.Config{AuthRateLimitPerMinute: 1})
+
+	first := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "first@example.com", Password: "hunter22222"})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first signup: status = %d, want 201, body = %s", first.Code, first.Body.String())
+	}
+
+	second := doJSON(t, srv, http.MethodPost, "/api/auth/signup", authRequest{Email: "second@example.com", Password: "hunter22222"})
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second signup (over the limit): status = %d, want 429, body = %s", second.Code, second.Body.String())
 	}
 }

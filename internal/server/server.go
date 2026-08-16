@@ -42,7 +42,14 @@ type Server struct {
 	hub         *realtimeHub
 	chatCache   *chatCache
 	rateLimiter *rateLimiter
-	providers   atomic.Pointer[providerBundle]
+	// authRateLimiter throttles unauthenticated auth endpoints (login,
+	// signup, password reset — see rateLimitByIP in middleware.go) by
+	// source IP, on its own separate budget from rateLimiter's per-user
+	// chat/LLM throttling — a burst of legitimate chat traffic must never
+	// count against (or be counted against by) a brute-force guard on the
+	// login form, and vice versa.
+	authRateLimiter *rateLimiter
+	providers       atomic.Pointer[providerBundle]
 	// startedAt backs the AI heartbeat/metrics dashboard's uptime figure —
 	// see internal/server/metrics.go.
 	startedAt time.Time
@@ -58,7 +65,12 @@ type Server struct {
 // when unconfigured (no API key), so a self-hoster who hasn't set one up
 // gets a clear per-request error instead of a broken client.
 func New(cfg config.Config, sqlDB *sql.DB) *Server {
-	s := &Server{cfg: cfg, db: sqlDB, hub: newRealtimeHub(), chatCache: newChatCache(), rateLimiter: newRateLimiter(cfg.RateLimitPerMinute), startedAt: time.Now()}
+	s := &Server{
+		cfg: cfg, db: sqlDB, hub: newRealtimeHub(), chatCache: newChatCache(),
+		rateLimiter:     newRateLimiter(cfg.RateLimitPerMinute),
+		authRateLimiter: newRateLimiter(cfg.AuthRateLimitPerMinute),
+		startedAt:       time.Now(),
+	}
 	if err := s.reloadProviders(context.Background()); err != nil {
 		log.Printf("load provider settings: %v (falling back to env-only config)", err)
 		s.providers.Store(&providerBundle{
@@ -188,7 +200,7 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.requestLogger)
 		r.Get("/health", s.handleHealth)
 		r.Get("/setup-status", s.handleSetupStatus)
-		r.Post("/login", s.handleUnifiedLogin)
+		r.With(s.rateLimitByIP).Post("/login", s.handleUnifiedLogin)
 		r.With(s.requireAdminAuth).Get("/logs", s.handleListLogs)
 		r.With(s.requireAdminAuth).Get("/logs/metrics", s.handleLogsMetrics)
 		r.With(s.requireAdminAuth).Get("/heartbeat", s.handleHeartbeat)
@@ -213,10 +225,10 @@ func (s *Server) Router() http.Handler {
 		})
 
 		r.Route("/auth", func(r chi.Router) {
-			r.Post("/signup", s.handleSignup)
-			r.Post("/login", s.handleLogin)
-			r.Post("/reset-password", s.handleResetPassword)
-			r.Post("/recover-password", s.handleRecoverPassword)
+			r.With(s.rateLimitByIP).Post("/signup", s.handleSignup)
+			r.With(s.rateLimitByIP).Post("/login", s.handleLogin)
+			r.With(s.rateLimitByIP).Post("/reset-password", s.handleResetPassword)
+			r.With(s.rateLimitByIP).Post("/recover-password", s.handleRecoverPassword)
 
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireUserAuth)
@@ -231,8 +243,8 @@ func (s *Server) Router() http.Handler {
 		})
 
 		r.Route("/admins", func(r chi.Router) {
-			r.Post("/signup", s.handleAdminSignup)
-			r.Post("/login", s.handleAdminLogin)
+			r.With(s.rateLimitByIP).Post("/signup", s.handleAdminSignup)
+			r.With(s.rateLimitByIP).Post("/login", s.handleAdminLogin)
 			r.With(s.requireAdminAuth).Post("/password-resets", s.handleCreatePasswordReset)
 
 			r.Group(func(r chi.Router) {

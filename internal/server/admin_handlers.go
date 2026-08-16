@@ -100,6 +100,10 @@ func (s *Server) handleAdminSignup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, adminAuthResponse{Token: token, Record: a, RecoveryPhrase: phrase})
 }
 
+// handleAdminLogin is rate-limited by remote IP via the rateLimitByIP
+// middleware — applied here since a superuser account is the highest-value
+// brute-force target in the whole system. See handleSignup's doc comment
+// in auth_handlers.go for why IP (not user identity) is the key pre-auth.
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	var req authRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -110,7 +114,10 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 
 	a, err := getAdminByEmail(r.Context(), s.db, req.Email)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusUnauthorized, "no_account", "No admin account found with this email.", nil)
+		// Same generic code as a wrong password below — see
+		// invalidLoginCode's doc comment (auth_handlers.go) for why this is
+		// no longer a distinct "no_account".
+		writeError(w, http.StatusUnauthorized, invalidLoginCode, invalidLoginMessage, nil)
 		return
 	}
 	if err != nil {
@@ -120,7 +127,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 
 	ok, err := auth.VerifyPassword(req.Password, a.PasswordHash)
 	if err != nil || !ok {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password.", nil)
+		writeError(w, http.StatusUnauthorized, invalidLoginCode, invalidLoginMessage, nil)
 		return
 	}
 

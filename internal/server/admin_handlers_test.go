@@ -104,32 +104,36 @@ func TestAdminLoginMixedCaseEmail(t *testing.T) {
 	}
 }
 
-// TestLoginErrorMessagesDistinguishCause covers the hand-tested feedback
-// that "invalid credentials" was shown even when no account exists at
-// all — login (both _users and _admins) should say "no_account" for an
-// unknown email and "invalid_credentials" only for a wrong password on an
-// account that does exist.
-func TestLoginErrorMessagesDistinguishCause(t *testing.T) {
+// TestLoginErrorMessagesDoNotDistinguishCause is the account-enumeration
+// regression test (security-audit Fix 7): an unknown email and a wrong
+// password on a known email used to return distinct codes ("no_account" vs
+// "invalid_credentials"), which let a caller cheaply enumerate which
+// emails have accounts by watching which error came back. Both cases must
+// now return the exact same generic code/message — see invalidLoginCode's
+// doc comment in auth_handlers.go. This intentionally replaces the old
+// TestLoginErrorMessagesDistinguishCause, which pinned the opposite
+// (distinguishing) behavior as correct.
+func TestLoginErrorMessagesDoNotDistinguishCause(t *testing.T) {
 	srv, _ := newTestServer(t)
 	signupUser(t, srv, "known@example.com")
 
 	t.Run("unknown user email", func(t *testing.T) {
 		rec := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "nobody@example.com", Password: "irrelevant1"})
-		assertErrorCode(t, rec, http.StatusUnauthorized, "no_account")
+		assertErrorCode(t, rec, http.StatusUnauthorized, invalidLoginCode)
 	})
 	t.Run("known user email, wrong password", func(t *testing.T) {
 		rec := doJSON(t, srv, http.MethodPost, "/api/auth/login", authRequest{Email: "known@example.com", Password: "wrong-password"})
-		assertErrorCode(t, rec, http.StatusUnauthorized, "invalid_credentials")
+		assertErrorCode(t, rec, http.StatusUnauthorized, invalidLoginCode)
 	})
 
 	bootstrapAdmin(t, srv)
 	t.Run("unknown admin email", func(t *testing.T) {
 		rec := doJSON(t, srv, http.MethodPost, "/api/admins/login", authRequest{Email: "nobody@example.com", Password: "irrelevant1"})
-		assertErrorCode(t, rec, http.StatusUnauthorized, "no_account")
+		assertErrorCode(t, rec, http.StatusUnauthorized, invalidLoginCode)
 	})
 	t.Run("known admin email, wrong password", func(t *testing.T) {
 		rec := doJSON(t, srv, http.MethodPost, "/api/admins/login", authRequest{Email: "admin@example.com", Password: "wrong-password"})
-		assertErrorCode(t, rec, http.StatusUnauthorized, "invalid_credentials")
+		assertErrorCode(t, rec, http.StatusUnauthorized, invalidLoginCode)
 	})
 }
 
