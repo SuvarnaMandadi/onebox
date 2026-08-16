@@ -380,7 +380,7 @@ function DiagnosticsSection({
 }) {
   const [report, setReport] = useState<ProviderDiagnosticsReport | null>(null)
   const [loading, setLoading] = useState(false)
-  const [history, setHistory] = useState<DiagnosticsHistoryEntry[]>([])
+  const [history, setHistory] = useState<DiagnosticsHistoryEntry[] | null>(null)
   const [performance, setPerformance] = useState<PerformanceSummary | null>(null)
   const [pullProgress, setPullProgress] = useState<Record<string, OllamaPullProgress>>({})
   const pullAbort = useRef<AbortController | null>(null)

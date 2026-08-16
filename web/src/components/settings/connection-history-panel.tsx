@@ -52,13 +52,14 @@ export function PerformancePanel({ summary }: { summary: PerformanceSummary | nu
   )
 }
 
-export function ConnectionHistoryPanel({ entries }: { entries: DiagnosticsHistoryEntry[] }) {
-  if (entries.length === 0) {
+export function ConnectionHistoryPanel({ entries }: { entries: DiagnosticsHistoryEntry[] | null }) {
+  const items = entries ?? []
+  if (items.length === 0) {
     return <p className="text-sm text-muted-foreground">No connection tests recorded yet — run diagnostics to start building history.</p>
   }
   return (
     <div className="max-h-64 space-y-1 overflow-y-auto">
-      {entries.map((e) => (
+      {items.map((e) => (
         <div key={e.id} className="flex items-center gap-2 border-b py-1.5 text-xs last:border-0">
           {e.success ? (
             <Check className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />

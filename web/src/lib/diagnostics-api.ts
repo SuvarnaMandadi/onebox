@@ -32,7 +32,10 @@ export function getDiagnosticsHistory(provider?: string, limit = 50) {
   const qs = new URLSearchParams()
   if (provider) qs.set("provider", provider)
   qs.set("limit", String(limit))
-  return api.get<{ items: DiagnosticsHistoryEntry[] }>(`/api/settings/diagnostics/history?${qs}`)
+  // items is a Go slice that serializes as JSON null when there's no
+  // history yet for this provider (true for every provider on a fresh
+  // install) — never assume it's an array.
+  return api.get<{ items: DiagnosticsHistoryEntry[] | null }>(`/api/settings/diagnostics/history?${qs}`)
 }
 
 export function getPerformanceSummary(provider: string) {

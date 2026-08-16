@@ -182,6 +182,12 @@ export function ProviderDiagnosticsPanel({
     return <p className="text-sm text-muted-foreground">Run diagnostics to see live status.</p>
   }
 
+  // checks/capabilities are Go slices that serialize as JSON null (not
+  // []) on any diagnostics path that returns before appending to them
+  // (e.g. no API key configured) — never assume they're arrays.
+  const checks = report.checks ?? []
+  const capabilities = report.capabilities ?? []
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -198,9 +204,9 @@ export function ProviderDiagnosticsPanel({
       </div>
 
       {/* Section 3/4: individual checks */}
-      {report.checks.length > 0 && (
+      {checks.length > 0 && (
         <div className="space-y-1.5">
-          {report.checks.map((c) => (
+          {checks.map((c) => (
             <div key={c.name} className="flex items-center gap-2 text-sm">
               {c.status === "ok" ? (
                 <Check className={cn("size-4 shrink-0", severityTone("ok"))} />
@@ -243,11 +249,11 @@ export function ProviderDiagnosticsPanel({
       )}
 
       {/* Section 6: capabilities */}
-      {!!report.capabilities.length && (
+      {!!capabilities.length && (
         <div>
           <p className="mb-1.5 text-xs font-medium text-muted-foreground">Capabilities</p>
           <div className="flex flex-wrap gap-1.5">
-            {report.capabilities.map((c) => (
+            {capabilities.map((c) => (
               <div key={c.name} className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs">
                 {c.supported ? <Check className="size-3 text-emerald-600 dark:text-emerald-400" /> : <X className="size-3 text-muted-foreground" />}
                 <span className={!c.supported ? "text-muted-foreground" : ""}>{c.name}</span>

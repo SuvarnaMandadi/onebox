@@ -68,14 +68,18 @@ export interface ProviderDiagnosticsReport {
   latency_ms: number
   checked_at: string
   total_check_ms: number
-  checks: CheckResult[]
+  // checks/capabilities are Go slices that serialize as JSON null (not
+  // []) whenever the backend never appends to them on a given code path
+  // (e.g. a diagnostics run that returns before any capability check) —
+  // always null-check before use, never assume they're arrays.
+  checks: CheckResult[] | null
   models?: ModelInfo[]
   default_model?: string
   selected_model?: string
   selected_model_found: boolean
   embedding_model?: string
   embedding_model_found: boolean
-  capabilities: Capability[]
+  capabilities: Capability[] | null
   context_window?: number
   max_tokens?: number
   uptime_seconds?: number
