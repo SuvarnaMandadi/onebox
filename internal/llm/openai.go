@@ -32,10 +32,11 @@ type openAIChatRequest struct {
 	Tools    []openAITool    `json:"tools,omitempty"`
 }
 
-// openAITool is Tool translated into OpenAI's function-calling shape —
-// https://platform.openai.com/docs/guides/function-calling. Parameters
-// takes the Tool's JSON Schema as-is, the same as every other provider
-// here: a field rename, not a translation.
+// openAITool is OpenAI's wire shape for one offered tool: a nested
+// {type:"function", function:{name, description, parameters}} object —
+// unlike Anthropic's flat {name, description, input_schema}. Ollama's
+// /api/chat tool format is identical to this one, so ollama.go reuses the
+// same shape rather than duplicating it (see ollamaTool).
 type openAITool struct {
 	Type     string             `json:"type"` // always "function"
 	Function openAIToolFunction `json:"function"`
@@ -43,10 +44,14 @@ type openAITool struct {
 
 type openAIToolFunction struct {
 	Name        string          `json:"name"`
-	Description string          `json:"description"`
+	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
+// toOpenAITools converts the provider-agnostic Tool list to OpenAI's wire
+// shape. Returns nil (omitted via omitempty above) for the common
+// no-tools case, so a plain chat request's body is byte-for-byte
+// unchanged from before tool-calling existed.
 func toOpenAITools(tools []Tool) []openAITool {
 	if len(tools) == 0 {
 		return nil
@@ -66,6 +71,45 @@ func toOpenAITools(tools []Tool) []openAITool {
 type openAIMessage struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"`
+	// ToolCalls, set only on a role:"assistant" message being replayed as
+	// history after a tool-execution round (see toOpenAIMessages), is
+	// OpenAI's native tool_calls field — required so the following
+	// role:"tool" message's ToolCallID has a matching call to attach to.
+	ToolCalls []openAIRequestToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID, set only on a role:"tool" message, is OpenAI's native
+	// tool_call_id field linking this result back to one entry in the
+	// immediately preceding assistant message's ToolCalls.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// openAIRequestToolCall is OpenAI's wire shape for one tool call inside an
+// outgoing assistant-message's tool_calls array — distinct from
+// openAIToolCallWire (the shape a *response* arrives in) only in that this
+// one always carries Type:"function", matching what OpenAI's API requires
+// on replay. See toOpenAIRequestToolCalls.
+type openAIRequestToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"` // always "function"
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// toOpenAIRequestToolCalls converts the provider-agnostic ToolCall list
+// (from Message.ToolCalls) into OpenAI's outgoing wire shape.
+func toOpenAIRequestToolCalls(calls []ToolCall) []openAIRequestToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]openAIRequestToolCall, len(calls))
+	for i, c := range calls {
+		out[i].ID = c.ID
+		out[i].Type = "function"
+		out[i].Function.Name = c.Name
+		out[i].Function.Arguments = string(c.Arguments)
+	}
+	return out
 }
 
 type openAIContentPart struct {
@@ -88,6 +132,22 @@ type openAIImageURL struct {
 func toOpenAIMessages(messages []Message) []openAIMessage {
 	out := make([]openAIMessage, len(messages))
 	for i, m := range messages {
+		// Role:"tool" carries a tool's result back to the model — OpenAI's
+		// native shape for this is {role:"tool", tool_call_id, content},
+		// never an image/text content-part array.
+		if m.Role == "tool" {
+			out[i] = openAIMessage{Role: "tool", Content: m.Content, ToolCallID: m.ToolCallID}
+			continue
+		}
+		// An assistant turn being replayed as history after making tool
+		// calls: Content may be empty ("" is fine — OpenAI-compatible APIs
+		// accept an empty string alongside tool_calls) plus the native
+		// tool_calls array so the following tool-result message(s) have a
+		// matching call to attach to.
+		if len(m.ToolCalls) > 0 {
+			out[i] = openAIMessage{Role: m.Role, Content: m.Content, ToolCalls: toOpenAIRequestToolCalls(m.ToolCalls)}
+			continue
+		}
 		if len(m.Images) == 0 {
 			out[i] = openAIMessage{Role: m.Role, Content: m.Content}
 			continue
@@ -110,12 +170,12 @@ type openAIUsage struct {
 	CompletionTokens int `json:"completion_tokens"`
 }
 
-// openAIToolCall is a single entry of message.tool_calls in OpenAI's
-// response — Arguments is a JSON-encoded *string* on the wire (unlike
-// Anthropic/Ollama, which both send a real JSON object), so it needs an
-// explicit re-typing to json.RawMessage rather than a field rename; see
-// toToolCalls.
-type openAIToolCall struct {
+// openAIToolCallWire is OpenAI's wire shape for one tool call the model
+// decided to make — Function.Arguments arrives as a JSON-encoded *string*
+// (OpenAI always sends it this way, unlike Ollama's native-object
+// arguments), so it's typed as a plain Go string here and converted to
+// json.RawMessage(...) directly (no unwrapping needed — see toToolCalls).
+type openAIToolCallWire struct {
 	ID       string `json:"id"`
 	Function struct {
 		Name      string `json:"name"`
@@ -123,28 +183,39 @@ type openAIToolCall struct {
 	} `json:"function"`
 }
 
-func toToolCalls(calls []openAIToolCall) []ToolCall {
-	if len(calls) == 0 {
-		return nil
-	}
-	out := make([]ToolCall, len(calls))
-	for i, c := range calls {
-		out[i] = ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: json.RawMessage(c.Function.Arguments)}
-	}
-	return out
-}
-
 type openAIChatResponse struct {
-	Choices []struct {
-		Message struct {
-			Content   string           `json:"content"`
-			ToolCalls []openAIToolCall `json:"tool_calls"`
-		} `json:"message"`
-	} `json:"choices"`
-	Usage openAIUsage `json:"usage"`
-	Error *struct {
+	Choices []openAIChoiceWire `json:"choices"`
+	Usage   openAIUsage        `json:"usage"`
+	Error   *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// openAIChoiceWire and openAIResponseMessageWire are named (rather than
+// inline anonymous structs, as these used to be) so openai_test.go can
+// construct one directly instead of re-declaring its exact field set at
+// every call site.
+type openAIChoiceWire struct {
+	Message openAIResponseMessageWire `json:"message"`
+}
+
+type openAIResponseMessageWire struct {
+	Content   string               `json:"content"`
+	ToolCalls []openAIToolCallWire `json:"tool_calls,omitempty"`
+}
+
+// toToolCalls converts OpenAI's wire-shape tool calls to the
+// provider-agnostic ToolCall list. Returns nil for the common no-tool-call
+// case.
+func toToolCalls(wire []openAIToolCallWire) []ToolCall {
+	if len(wire) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, len(wire))
+	for i, w := range wire {
+		out[i] = ToolCall{ID: w.ID, Name: w.Function.Name, Arguments: json.RawMessage(w.Function.Arguments)}
+	}
+	return out
 }
 
 func (c *OpenAIClient) newRequest(ctx context.Context, body []byte) (*http.Request, error) {
@@ -190,19 +261,19 @@ func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, e
 
 	return ChatResult{
 		Content:   parsed.Choices[0].Message.Content,
+		ToolCalls: toToolCalls(parsed.Choices[0].Message.ToolCalls),
 		TokensIn:  parsed.Usage.PromptTokens,
 		TokensOut: parsed.Usage.CompletionTokens,
-		ToolCalls: toToolCalls(parsed.Choices[0].Message.ToolCalls),
 	}, nil
 }
 
-// openAIStreamToolCall is one delta.tool_calls entry — Index correlates
-// fragments across chunks the same way Anthropic's content-block Index
-// does: OpenAI sends a tool call's id/name once (on the chunk that starts
-// it) and its arguments as a run of string fragments after that, all
-// sharing one Index, so nothing here is a complete ToolCall until the
-// stream ends.
-type openAIStreamToolCall struct {
+// openAIStreamToolCallDelta is one fragment of a streamed tool call.
+// Index identifies which tool call this fragment belongs to (a response
+// can stream more than one call concurrently); ID and Function.Name only
+// arrive on that index's first delta, while Function.Arguments arrives as
+// successive string fragments to be concatenated — mirroring how content
+// deltas work, just for the arguments string instead of prose.
+type openAIStreamToolCallDelta struct {
 	Index    int    `json:"index"`
 	ID       string `json:"id"`
 	Function struct {
@@ -214,8 +285,8 @@ type openAIStreamToolCall struct {
 type openAIStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string                 `json:"content"`
-			ToolCalls []openAIStreamToolCall `json:"tool_calls"`
+			Content   string                      `json:"content"`
+			ToolCalls []openAIStreamToolCallDelta `json:"tool_calls,omitempty"`
 		} `json:"delta"`
 	} `json:"choices"`
 	Usage *openAIUsage `json:"usage"`
@@ -248,12 +319,12 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest, onDelta 
 	}
 
 	var result ChatResult
-	// toolCalls accumulates fragments by Index — see openAIStreamToolCall's
-	// doc comment. toolOrder preserves first-seen order since Go maps
-	// don't, so the finished ToolCalls slice comes out in the order the
-	// model emitted them rather than random map iteration order.
-	toolCalls := map[int]*ToolCall{}
-	var toolOrder []int
+	// callsByIndex accumulates each streamed tool call's ID/Name/Arguments
+	// fragments across chunks, keyed by the call's own Index (see
+	// openAIStreamToolCallDelta) — OpenAI has no per-call "stop" event the
+	// way Anthropic does, so calls are only finalized once the stream ends.
+	callsByIndex := map[int]*ToolCall{}
+	var callOrder []int
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -277,32 +348,28 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest, onDelta 
 				result.Content += choice.Delta.Content
 				onDelta(choice.Delta.Content)
 			}
-			// Tool-call argument fragments are never forwarded to
-			// onDelta — see ToolCall's doc comment in llm.go: they're
-			// structured data for ToolCalls, not chat text, and aren't
-			// valid JSON until every fragment has arrived.
 			for _, tc := range choice.Delta.ToolCalls {
-				existing, ok := toolCalls[tc.Index]
-				if !ok {
-					existing = &ToolCall{}
-					toolCalls[tc.Index] = existing
-					toolOrder = append(toolOrder, tc.Index)
+				call, seen := callsByIndex[tc.Index]
+				if !seen {
+					call = &ToolCall{}
+					callsByIndex[tc.Index] = call
+					callOrder = append(callOrder, tc.Index)
 				}
 				if tc.ID != "" {
-					existing.ID = tc.ID
+					call.ID = tc.ID
 				}
 				if tc.Function.Name != "" {
-					existing.Name += tc.Function.Name
+					call.Name = tc.Function.Name
 				}
-				existing.Arguments = json.RawMessage(string(existing.Arguments) + tc.Function.Arguments)
+				call.Arguments = append(call.Arguments, []byte(tc.Function.Arguments)...)
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return result, fmt.Errorf("read stream: %w", err)
 	}
-	for _, idx := range toolOrder {
-		result.ToolCalls = append(result.ToolCalls, *toolCalls[idx])
+	for _, idx := range callOrder {
+		result.ToolCalls = append(result.ToolCalls, *callsByIndex[idx])
 	}
 	return result, nil
 }

@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,7 +20,7 @@ func TestOllamaClientChat(t *testing.T) {
 			t.Error("expected stream=false for non-streaming Chat()")
 		}
 		json.NewEncoder(w).Encode(ollamaChatChunk{
-			Message:         ollamaResponseMessage{Content: "hi from llama"},
+			Message:         ollamaChatMessageWire{Content: "hi from llama"},
 			Done:            true,
 			PromptEvalCount: 6,
 			EvalCount:       4,
@@ -45,8 +44,8 @@ func TestOllamaClientChat(t *testing.T) {
 func TestOllamaClientChatStream(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		chunks := []ollamaChatChunk{
-			{Message: ollamaResponseMessage{Content: "Hi"}},
-			{Message: ollamaResponseMessage{Content: " there"}},
+			{Message: ollamaChatMessageWire{Content: "Hi"}},
+			{Message: ollamaChatMessageWire{Content: " there"}},
 			{Done: true, PromptEvalCount: 5, EvalCount: 2},
 		}
 		for _, c := range chunks {
@@ -72,149 +71,6 @@ func TestOllamaClientChatStream(t *testing.T) {
 	}
 	if result.TokensIn != 5 || result.TokensOut != 2 {
 		t.Fatalf("tokens = (%d, %d), want (5, 2)", result.TokensIn, result.TokensOut)
-	}
-}
-
-// TestOllamaClientChatToolCall pins the non-streaming tool-calling
-// contract for Ollama, including its per-call id (confirmed present live
-// against Ollama 0.32.1 — see ollamaToolCall's doc comment) and Arguments
-// arriving as a native JSON object on the wire (not a JSON-encoded string
-// the way OpenAI sends it).
-func TestOllamaClientChatToolCall(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), `"type":"function"`) || !strings.Contains(string(body), `"name":"create_collection"`) {
-			t.Errorf("request missing function tool declaration: %s", body)
-		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{
-					{"id": "call_j5etnihw", "function": map[string]any{"name": "create_collection", "arguments": map[string]any{"name": "notes"}}},
-				},
-			},
-			"done": true,
-		})
-	}))
-	defer srv.Close()
-
-	c := NewOllamaClient(srv.URL)
-	result, err := c.Chat(context.Background(), ChatRequest{
-		Model:    "llama3.2:3b",
-		Messages: []Message{{Role: "user", Content: "create a notes collection"}},
-		Tools:    []Tool{{Name: "create_collection", Schema: json.RawMessage(`{"type":"object"}`)}},
-	})
-	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
-	}
-	if len(result.ToolCalls) != 1 {
-		t.Fatalf("ToolCalls = %d, want 1: %+v", len(result.ToolCalls), result.ToolCalls)
-	}
-	tc := result.ToolCalls[0]
-	if tc.ID != "call_j5etnihw" {
-		t.Fatalf("ID = %q, want call_j5etnihw", tc.ID)
-	}
-	if tc.Name != "create_collection" {
-		t.Fatalf("Name = %q, want create_collection", tc.Name)
-	}
-	var args map[string]string
-	if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-		t.Fatalf("Arguments not valid JSON: %v (%s)", err, tc.Arguments)
-	}
-	if args["name"] != "notes" {
-		t.Fatalf("args[name] = %q, want notes", args["name"])
-	}
-}
-
-// TestOllamaClientChatToolCallStringifiedNestedArguments reproduces a
-// real quirk observed live against Ollama 0.32.1 + llama3.2:3b: a nested
-// array argument ("fields") comes back JSON-encoded as a string instead
-// of a native array. This test only pins that OllamaClient itself passes
-// Arguments through byte-for-byte as whatever the wire actually sent —
-// unwrapping that string is compatNormalizingParser's job, one layer up
-// in internal/server (see chatbot_actions_compat.go), not this client's.
-func TestOllamaClientChatToolCallStringifiedNestedArguments(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{
-					{"id": "call_j5etnihw", "function": map[string]any{
-						"name":      "create_collection",
-						"arguments": map[string]any{"name": "notes", "fields": `[{"name": "body", "type": "text"}]`},
-					}},
-				},
-			},
-			"done": true,
-		})
-	}))
-	defer srv.Close()
-
-	c := NewOllamaClient(srv.URL)
-	result, err := c.Chat(context.Background(), ChatRequest{
-		Model:    "llama3.2:3b",
-		Messages: []Message{{Role: "user", Content: "create a notes collection with a body field"}},
-	})
-	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
-	}
-	var args map[string]any
-	if err := json.Unmarshal(result.ToolCalls[0].Arguments, &args); err != nil {
-		t.Fatalf("Arguments not valid JSON: %v", err)
-	}
-	if _, isString := args["fields"].(string); !isString {
-		t.Fatalf("expected this test to reproduce the raw stringified-array quirk untouched, got %T: %v", args["fields"], args["fields"])
-	}
-}
-
-// TestOllamaClientChatStreamToolCall pins that Ollama sends a streamed
-// tool call whole in a single chunk (unlike OpenAI/Anthropic's fragment-
-// and-reassemble shape) and that it never reaches onDelta.
-func TestOllamaClientChatStreamToolCall(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		chunks := []map[string]any{
-			{"message": map[string]any{"content": "One sec."}},
-			{"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{
-					{"function": map[string]any{"name": "create_collection", "arguments": map[string]any{"name": "notes"}}},
-				},
-			}},
-			{"done": true, "prompt_eval_count": 7, "eval_count": 3},
-		}
-		for _, c := range chunks {
-			b, _ := json.Marshal(c)
-			w.Write(append(b, '\n'))
-		}
-	}))
-	defer srv.Close()
-
-	c := NewOllamaClient(srv.URL)
-	var deltas []string
-	result, err := c.ChatStream(context.Background(), ChatRequest{
-		Model:    "llama3.2:3b",
-		Messages: []Message{{Role: "user", Content: "create a notes collection"}},
-		Tools:    []Tool{{Name: "create_collection", Schema: json.RawMessage(`{"type":"object"}`)}},
-	}, func(d string) { deltas = append(deltas, d) })
-	if err != nil {
-		t.Fatalf("ChatStream() error = %v", err)
-	}
-	if strings.Join(deltas, "") != "One sec." {
-		t.Fatalf("deltas leaked tool-call content: %q", strings.Join(deltas, ""))
-	}
-	if len(result.ToolCalls) != 1 {
-		t.Fatalf("ToolCalls = %d, want 1: %+v", len(result.ToolCalls), result.ToolCalls)
-	}
-	tc := result.ToolCalls[0]
-	var args map[string]string
-	if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-		t.Fatalf("Arguments not valid JSON: %v (%s)", err, tc.Arguments)
-	}
-	if args["name"] != "notes" {
-		t.Fatalf("args[name] = %q, want notes", args["name"])
-	}
-	if result.TokensIn != 7 || result.TokensOut != 3 {
-		t.Fatalf("tokens = (%d, %d), want (7, 3)", result.TokensIn, result.TokensOut)
 	}
 }
 

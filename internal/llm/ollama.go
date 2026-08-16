@@ -32,10 +32,13 @@ type ollamaChatRequest struct {
 	Tools    []ollamaTool    `json:"tools,omitempty"`
 }
 
-// ollamaTool is Tool translated into Ollama's tool-calling shape, which
-// mirrors OpenAI's (https://github.com/ollama/ollama/blob/main/docs/api.md#chat-request-with-tools)
-// field for field — a rename, not a translation, same as every other
-// provider here.
+// ollamaTool is Ollama's wire shape for one offered tool — a nested
+// {type:"function", function:{name, description, parameters}} object,
+// modeled on (and identical in shape to) OpenAI's own tool format; see
+// openAITool in openai.go for that provider's independent copy of the same
+// shape (kept separate rather than shared, matching this codebase's
+// existing per-provider wire-type convention — see ollamaMessage vs
+// openAIMessage).
 type ollamaTool struct {
 	Type     string             `json:"type"` // always "function"
 	Function ollamaToolFunction `json:"function"`
@@ -43,10 +46,14 @@ type ollamaTool struct {
 
 type ollamaToolFunction struct {
 	Name        string          `json:"name"`
-	Description string          `json:"description"`
+	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
+// toOllamaTools converts the provider-agnostic Tool list to Ollama's wire
+// shape. Returns nil (omitted via omitempty above) for the common
+// no-tools case, so a plain chat request's body is byte-for-byte unchanged
+// from before tool-calling existed.
 func toOllamaTools(tools []Tool) []ollamaTool {
 	if len(tools) == 0 {
 		return nil
@@ -65,16 +72,53 @@ type ollamaMessage struct {
 	Role    string   `json:"role"`
 	Content string   `json:"content"`
 	Images  []string `json:"images,omitempty"`
+	// ToolCalls, set only on a role:"assistant" message being replayed as
+	// history after a tool-execution round (see toOllamaMessages), is
+	// Ollama's native tool_calls field. A following role:"tool" message
+	// needs no linkage field here — unlike OpenAI/Anthropic, Ollama's
+	// tool-result convention is a plain {role:"tool", content} message
+	// with no call ID at all (see ToolCall's doc comment in llm.go).
+	ToolCalls []ollamaRequestToolCall `json:"tool_calls,omitempty"`
+}
+
+// ollamaRequestToolCall is Ollama's wire shape for one tool call inside an
+// outgoing assistant-message's tool_calls array. Unlike
+// openAIRequestToolCall, Arguments is a native JSON object (not a
+// JSON-encoded string) and there is no ID field — mirroring how a response
+// tool call arrives (see ollamaToolCallWire).
+type ollamaRequestToolCall struct {
+	Function struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"function"`
+}
+
+// toOllamaRequestToolCalls converts the provider-agnostic ToolCall list
+// (from Message.ToolCalls) into Ollama's outgoing wire shape.
+func toOllamaRequestToolCalls(calls []ToolCall) []ollamaRequestToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]ollamaRequestToolCall, len(calls))
+	for i, c := range calls {
+		out[i].Function.Name = c.Name
+		out[i].Function.Arguments = c.Arguments
+	}
+	return out
 }
 
 // toOllamaMessages converts the provider-agnostic Message list to Ollama's
 // wire shape, base64-encoding any Message.Images into the flat "images"
-// field Ollama expects alongside Content. Messages with no images marshal
-// identically to before this field existed (an omitted "images" key).
+// field Ollama expects alongside Content, and translating Message.ToolCalls
+// (an assistant turn being replayed after a tool-execution round) into the
+// native tool_calls field. A Role:"tool" message (a tool's result) needs no
+// special handling beyond its plain Role/Content — see ollamaMessage's doc
+// comment. Messages with none of this marshal identically to before these
+// fields existed.
 func toOllamaMessages(messages []Message) []ollamaMessage {
 	out := make([]ollamaMessage, len(messages))
 	for i, m := range messages {
-		om := ollamaMessage{Role: m.Role, Content: m.Content}
+		om := ollamaMessage{Role: m.Role, Content: m.Content, ToolCalls: toOllamaRequestToolCalls(m.ToolCalls)}
 		for _, img := range m.Images {
 			om.Images = append(om.Images, base64.StdEncoding.EncodeToString(img.Data))
 		}
@@ -83,32 +127,48 @@ func toOllamaMessages(messages []Message) []ollamaMessage {
 	return out
 }
 
-// ollamaToolCall is one entry of message.tool_calls — Arguments arrives as
-// a real JSON object on Ollama's wire (unlike OpenAI's JSON-encoded
-// string), so it maps straight onto json.RawMessage with no re-typing.
-// Ollama does mint a per-call ID (confirmed live against Ollama 0.32.1),
-// same as Anthropic/OpenAI, though its API docs don't guarantee one for
-// every model/version — ToolCall.ID is simply whatever came back, empty
-// or not.
-type ollamaToolCall struct {
-	ID       string `json:"id"`
+// ollamaToolCallWire is Ollama's wire shape for one tool call the model
+// decided to make. Unlike OpenAI, Arguments arrives as a native JSON
+// object (not a JSON-encoded string) and there is no call ID at all — see
+// ToolCall's doc comment. A separate, real quirk (some local models
+// re-stringify a *nested* array/object value inside Arguments) is
+// compensated for downstream, not here — see
+// internal/server/chatbot_actions_compat.go.
+type ollamaToolCallWire struct {
 	Function struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	} `json:"function"`
 }
 
-type ollamaResponseMessage struct {
-	Content   string           `json:"content"`
-	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
-}
-
 type ollamaChatChunk struct {
-	Message         ollamaResponseMessage `json:"message"`
+	// Message is named (rather than an inline anonymous struct, as this
+	// used to be) so ollama_test.go can construct one directly instead of
+	// re-declaring its exact field set at every call site.
+	Message         ollamaChatMessageWire `json:"message"`
 	Done            bool                  `json:"done"`
 	PromptEvalCount int                   `json:"prompt_eval_count"`
 	EvalCount       int                   `json:"eval_count"`
 	Error           string                `json:"error"`
+}
+
+type ollamaChatMessageWire struct {
+	Content   string               `json:"content"`
+	ToolCalls []ollamaToolCallWire `json:"tool_calls,omitempty"`
+}
+
+// toOllamaToolCalls converts Ollama's wire-shape tool calls to the
+// provider-agnostic ToolCall list. Returns nil for the common
+// no-tool-call case.
+func toOllamaToolCalls(wire []ollamaToolCallWire) []ToolCall {
+	if len(wire) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, len(wire))
+	for i, w := range wire {
+		out[i] = ToolCall{Name: w.Function.Name, Arguments: w.Function.Arguments}
+	}
+	return out
 }
 
 func (c *OllamaClient) newRequest(ctx context.Context, body []byte) (*http.Request, error) {
@@ -240,22 +300,6 @@ func (c *OllamaClient) Version(ctx context.Context) (string, error) {
 	return parsed.Version, nil
 }
 
-// toOllamaToolCalls converts Ollama's own tool_calls shape to the
-// provider-agnostic ToolCall — shared by Chat (a single response) and
-// ChatStream (Ollama sends each streamed tool call whole, in one chunk,
-// never fragmented across several the way OpenAI/Anthropic do, so there's
-// no accumulation to do — just this same conversion, called once).
-func toOllamaToolCalls(calls []ollamaToolCall) []ToolCall {
-	if len(calls) == 0 {
-		return nil
-	}
-	out := make([]ToolCall, len(calls))
-	for i, c := range calls {
-		out[i] = ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: c.Function.Arguments}
-	}
-	return out
-}
-
 func (c *OllamaClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, error) {
 	buildStart := time.Now()
 	body, err := json.Marshal(ollamaChatRequest{Model: req.Model, Messages: toOllamaMessages(req.Messages), Stream: false, Tools: toOllamaTools(req.Tools)})
@@ -297,9 +341,9 @@ func (c *OllamaClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, e
 
 	return ChatResult{
 		Content:   parsed.Message.Content,
+		ToolCalls: toOllamaToolCalls(parsed.Message.ToolCalls),
 		TokensIn:  parsed.PromptEvalCount,
 		TokensOut: parsed.EvalCount,
-		ToolCalls: toOllamaToolCalls(parsed.Message.ToolCalls),
 		Timing: ChatTiming{
 			RequestBuild:    requestBuild,
 			TimeToFirstByte: ttfb,
@@ -350,6 +394,10 @@ func (c *OllamaClient) ChatStream(ctx context.Context, req ChatRequest, onDelta 
 			result.Content += chunk.Message.Content
 			onDelta(chunk.Message.Content)
 		}
+		// Unlike OpenAI/Anthropic, Ollama does not fragment a tool call's
+		// arguments across chunks — when the model decides to call a tool,
+		// the whole tool_calls array arrives complete in one chunk, so this
+		// is a straight append, never an accumulate-then-finalize dance.
 		if len(chunk.Message.ToolCalls) > 0 {
 			result.ToolCalls = append(result.ToolCalls, toOllamaToolCalls(chunk.Message.ToolCalls)...)
 		}

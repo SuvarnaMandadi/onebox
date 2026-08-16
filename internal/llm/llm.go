@@ -11,7 +11,7 @@ import (
 )
 
 type Message struct {
-	Role    string `json:"role"` // "system", "user", or "assistant"
+	Role    string `json:"role"` // "system", "user", "assistant", or "tool"
 	Content string `json:"content"`
 	// Images are optional vision attachments for this message — empty for
 	// every ordinary text-only turn (which, today, is still every message
@@ -23,6 +23,26 @@ type Message struct {
 	// this field only gets populated in Go, never from that endpoint's
 	// request body. See MessageImage for how each Provider translates it.
 	Images []MessageImage `json:"-"`
+	// ToolCalls, set only on a Role:"assistant" message being replayed back
+	// as conversation history after a tool-execution round (see the
+	// multi-round loop in internal/server/chatbot_handlers.go), are the
+	// exact calls that assistant turn made. Each Provider reconstructs its
+	// own native assistant-turn-with-tool-calls wire shape from this
+	// (Anthropic's tool_use content blocks, OpenAI/Ollama's tool_calls
+	// field) — required so the *next* call's tool-result message has
+	// something to attach to; a provider cannot accept a tool-result
+	// message that doesn't follow a matching tool call in the same
+	// conversation.
+	ToolCalls []ToolCall `json:"-"`
+	// ToolCallID, set only on a Role:"tool" message, names which ToolCall
+	// (by ID) from the immediately preceding assistant turn this message
+	// is the result of — every provider's native tool-result wire format
+	// requires this linkage. Content on a "tool" message is the tool's
+	// plain-text result (see chatbot_tool_execution.go's toolResult).
+	// Ollama calls send no ID at all (see ToolCall's doc comment); for
+	// those, providers fall back to positional/name matching rather than
+	// requiring a non-empty ToolCallID.
+	ToolCallID string `json:"-"`
 }
 
 // MessageImage is one image attachment on a Message, already decoded to
@@ -43,41 +63,38 @@ type MessageImage struct {
 	Data      []byte // raw (not base64-encoded) image bytes
 }
 
-// Tool is a provider-agnostic function/tool declaration — a caller that
-// wants structured output back (see internal/server/chatbot_actions.go)
-// describes it once here and each Provider translates it into that API's
-// own native tool/function-calling wire shape (Anthropic's `tools` +
-// `input_schema`, OpenAI's `tools` + `function.parameters`, Ollama's
-// `tools`, which mirrors OpenAI's). The model decides for itself whether
-// and when to call it; nothing here forces a call.
+// Tool describes one function the model may call natively during a chat
+// turn — the provider-agnostic shape every Provider translates into its
+// own wire format (Anthropic's top-level "tools" array with
+// "input_schema", OpenAI's "tools" array of {type:"function", function},
+// Ollama's identically-shaped "tools" array). Schema is plain JSON Schema
+// (the "object/properties/required" subset every provider here accepts
+// unmodified) describing the tool's arguments — see
+// internal/server/chatbot_actions.go for the concrete tools this codebase
+// offers. Description is the only channel that tells the model when to
+// call this tool instead of just answering in prose; there is no other
+// per-tool signal, so every caller writes one that names the concrete
+// admin request it answers, not just its own name.
 type Tool struct {
-	// Name is both the wire-level tool name the provider echoes back on a
-	// ToolCall and, for the admin chatbot's use, the same string as the
-	// resulting proposedAction.Type (see actionToolDefs) — one identifier,
-	// no separate mapping table to keep in sync.
-	Name string
-	// Description is the only thing that tells the model when to call this
-	// tool — there is no other channel (see Tool's doc comment above), so
-	// it needs to name the concrete situation ("the admin asked to create
-	// a new collection"), not just restate the tool's name.
+	Name        string
 	Description string
-	// Schema is a JSON Schema object (draft-07-compatible subset — every
-	// provider here accepts the same "object/properties/required" shape)
-	// describing the tool's arguments. Raw JSON rather than a Go struct
-	// because each provider embeds it as-is in its own request body.
-	Schema json.RawMessage
+	Schema      json.RawMessage
 }
 
-// ToolCall is one invocation of a Tool the model chose to make, as
-// reported back by the provider — already fully structured (Arguments is
-// the provider's own decoded JSON object for that call, not text the
-// caller has to parse out of a reply). ID is the provider's own call
-// identifier where one exists — Anthropic and OpenAI always mint one;
-// Ollama does too as of the version this was built/tested against
-// (0.32.1), though its API makes no guarantee across every model/version,
-// so treat ID as "populated when the provider bothers to send one," not
-// a value to depend on. Round-tripped for providers whose API requires
-// echoing it back on a follow-up turn; unused otherwise.
+// ToolCall is one function call the model decided to make, translated
+// back from whichever provider-specific wire shape it arrived in via that
+// provider's own *native* tool-calling channel — never inferred from
+// prose. Arguments is that provider's own decoded JSON for this call's
+// parameters, already a well-formed json.RawMessage object (a second
+// json.Unmarshal into the matching payload struct is ActionParser's job —
+// see chatbot_actions.go's strictUnmarshal). One known wire quirk from a
+// local Ollama model re-stringifies nested array/object argument values;
+// that is compensated for downstream (see
+// internal/server/chatbot_actions_compat.go), never inside a Provider —
+// Provider implementations only ever decode what the API actually sent,
+// nothing more. ID is the provider's own call identifier when it supplies
+// one (Anthropic, OpenAI); Ollama sends none, so ID is empty for calls
+// that came from it — nothing downstream may depend on ID being non-empty.
 type ToolCall struct {
 	ID        string
 	Name      string
@@ -87,10 +104,13 @@ type ToolCall struct {
 type ChatRequest struct {
 	Model    string
 	Messages []Message
-	// Tools are optionally offered to the model this turn — see Tool's
-	// doc comment. Omitted (nil) for every ordinary request; only the
-	// admin chatbot's full path attaches the action tool defs today (see
-	// chatbot_actions.go).
+	// Tools are the functions the model may call natively this turn — nil
+	// (the overwhelming common case: every lightweight-greeting fast-path
+	// request, the generic /api/llm/chat gateway, /api/rag/answer) means
+	// exactly what it always meant before Tool existed: a plain chat
+	// completion with no function-calling offered at all. Only the admin
+	// chatbot's full (non-greeting) turn populates this — see
+	// answerChatbotQuestion and actionToolDefs.
 	Tools []Tool
 }
 
@@ -125,14 +145,23 @@ type ChatResult struct {
 	TokensIn  int
 	TokensOut int
 	Timing    ChatTiming
-	// ToolCalls is every tool the model invoked this turn (see Tool),
-	// already parsed into structured Arguments — empty for any request
-	// that didn't offer Tools, and often empty even when it did, since
-	// calling a tool is always the model's choice. Content and ToolCalls
-	// are independent: a provider may return accompanying text alongside
-	// a tool call, only a tool call, or only text — callers must not
-	// assume one implies something about the other.
+	// ToolCalls are populated only from a provider's *native* structured
+	// tool-calling response field (Anthropic's tool_use content blocks,
+	// OpenAI's message.tool_calls, Ollama's message.tool_calls) — never
+	// guessed at from Content. Empty on every turn where the model didn't
+	// call anything, which is the normal, valid outcome for a plain
+	// question (see chatbot_actions.go's ActionParser doc comment) — never
+	// treat an empty ToolCalls as an error.
 	ToolCalls []ToolCall
+	// Truncated reports whether the provider itself says this reply was cut
+	// off by the max-tokens cap rather than reaching a natural stopping
+	// point — Anthropic's stop_reason == "max_tokens" (see AnthropicClient's
+	// Chat/ChatStream). A truncated reply's tool-call JSON (if it was mid
+	// tool_use block) will typically fail to unmarshal downstream, which
+	// previously surfaced as an opaque "could not be validated" with no clue
+	// the real cause was the token cap. Only Anthropic populates this today;
+	// false is the correct zero value for every other provider/response.
+	Truncated bool
 }
 
 // Provider is a single chat-completion backend.

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -38,9 +39,23 @@ type anthropicMessage struct {
 }
 
 type anthropicContentBlock struct {
-	Type   string                `json:"type"` // "text" or "image"
+	Type   string                `json:"type"` // "text", "image", "tool_use", or "tool_result"
 	Text   string                `json:"text,omitempty"`
 	Source *anthropicImageSource `json:"source,omitempty"`
+	// ID/Name/Input populate a "tool_use" block — used both when parsing a
+	// non-streaming response (see anthropicResponseBlock, a separate type)
+	// and when replaying an assistant's prior tool call back as history
+	// (see toAnthropicMessage).
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+	// ToolUseID/Content populate a "tool_result" block — Anthropic's wire
+	// convention for supplying a tool's result back to the model. Per
+	// Anthropic's API, a tool_result block is sent inside a role:"user"
+	// message (never role:"tool" — Anthropic has no such role), linked to
+	// the matching tool_use block by ToolUseID. See toAnthropicMessage.
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	Content   string `json:"content,omitempty"`
 }
 
 type anthropicImageSource struct {
@@ -80,17 +95,19 @@ type anthropicRequest struct {
 	Tools     []anthropicTool    `json:"tools,omitempty"`
 }
 
-// anthropicTool is Tool translated into Anthropic's Messages API shape —
-// see https://docs.anthropic.com/en/docs/build-with-claude/tool-use.
-// InputSchema takes the Tool's JSON Schema as-is (Anthropic's schema
-// dialect is the same draft this codebase's Tool.Schema values are
-// written in), so this is a field rename, not a translation.
+// anthropicTool is Anthropic's wire shape for one offered tool — a flat
+// {name, description, input_schema} object, unlike OpenAI/Ollama's nested
+// {type:"function", function:{...}}. See toAnthropicTools.
 type anthropicTool struct {
 	Name        string          `json:"name"`
-	Description string          `json:"description"`
+	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
+// toAnthropicTools converts the provider-agnostic Tool list to Anthropic's
+// wire shape. Returns nil (omitted entirely, via omitempty above) for the
+// common no-tools case, so a plain chat request's body is byte-for-byte
+// unchanged from before tool-calling existed.
 func toAnthropicTools(tools []Tool) []anthropicTool {
 	if len(tools) == 0 {
 		return nil
@@ -108,17 +125,29 @@ type anthropicUsage struct {
 }
 
 type anthropicResponse struct {
-	Content []struct {
-		Type  string          `json:"type"` // "text" or "tool_use"
-		Text  string          `json:"text,omitempty"`
-		ID    string          `json:"id,omitempty"`
-		Name  string          `json:"name,omitempty"`
-		Input json.RawMessage `json:"input,omitempty"`
-	} `json:"content"`
-	Usage anthropicUsage `json:"usage"`
-	Error *struct {
+	Content []anthropicResponseBlock `json:"content"`
+	Usage   anthropicUsage           `json:"usage"`
+	// StopReason is Anthropic's own reason the model stopped generating —
+	// "end_turn"/"tool_use" for a normal completion, "max_tokens" when
+	// defaultMaxTokens cut it off mid-generation. See Chat's use of this
+	// below and ChatResult.Truncated's doc comment (llm.go).
+	StopReason string `json:"stop_reason"`
+	Error      *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// anthropicResponseBlock is one entry in a non-streaming response's
+// content array — named (rather than an inline anonymous struct, as this
+// used to be) so anthropic_test.go can construct one directly instead of
+// re-declaring its exact field set at every call site.
+type anthropicResponseBlock struct {
+	Type string `json:"type"` // "text" or "tool_use"
+	Text string `json:"text"`
+	// ID/Name/Input are only present on a "tool_use" block.
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 // splitSystem pulls any "system"-role messages out of the OpenAI-style
@@ -135,9 +164,48 @@ func splitSystem(messages []Message) (string, []anthropicMessage) {
 			system.WriteString(m.Content)
 			continue
 		}
-		rest = append(rest, anthropicMessage{Role: m.Role, Content: anthropicContent(m)})
+		rest = append(rest, toAnthropicMessage(m))
 	}
 	return system.String(), rest
+}
+
+// toAnthropicMessage translates one Message into Anthropic's wire shape,
+// covering the three cases beyond plain text/image content:
+//   - Role:"tool" (a tool's result, from the multi-round tool-execution
+//     loop in internal/server/chatbot_handlers.go) becomes a role:"user"
+//     message with a single tool_result block — Anthropic has no "tool"
+//     role; tool_result blocks are conventionally carried inside a user
+//     turn, linked back to the matching tool_use block via ToolUseID.
+//   - Role:"assistant" with ToolCalls set (replaying a prior turn where
+//     the model called one or more tools) becomes an optional leading text
+//     block followed by one tool_use block per call — required so the
+//     provider has a tool_use block for the following tool_result message
+//     to attach to; Anthropic rejects a tool_result with no matching
+//     tool_use earlier in the conversation.
+//   - Everything else falls back to the pre-existing anthropicContent
+//     (plain string, or text+image blocks) unchanged.
+func toAnthropicMessage(m Message) anthropicMessage {
+	if m.Role == "tool" {
+		return anthropicMessage{
+			Role: "user",
+			Content: []anthropicContentBlock{{
+				Type:      "tool_result",
+				ToolUseID: m.ToolCallID,
+				Content:   m.Content,
+			}},
+		}
+	}
+	if len(m.ToolCalls) > 0 {
+		blocks := make([]anthropicContentBlock, 0, len(m.ToolCalls)+1)
+		if m.Content != "" {
+			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+		}
+		for _, tc := range m.ToolCalls {
+			blocks = append(blocks, anthropicContentBlock{Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: tc.Arguments})
+		}
+		return anthropicMessage{Role: m.Role, Content: blocks}
+	}
+	return anthropicMessage{Role: m.Role, Content: anthropicContent(m)}
 }
 
 func (c *AnthropicClient) newRequest(ctx context.Context, body []byte) (*http.Request, error) {
@@ -190,48 +258,46 @@ func (c *AnthropicClient) Chat(ctx context.Context, req ChatRequest) (ChatResult
 			calls = append(calls, ToolCall{ID: block.ID, Name: block.Name, Arguments: block.Input})
 		}
 	}
-	return ChatResult{Content: text, TokensIn: parsed.Usage.InputTokens, TokensOut: parsed.Usage.OutputTokens, ToolCalls: calls}, nil
+	// stop_reason == "max_tokens" means defaultMaxTokens cut this reply off
+	// mid-generation — logged distinctly here (rather than left to surface
+	// downstream as an opaque "tool call could not be validated" once its
+	// truncated JSON fails to unmarshal) so the real cause is visible in the
+	// server log the moment it happens, not reverse-engineered later. See
+	// ChatResult.Truncated's doc comment.
+	truncated := parsed.StopReason == "max_tokens"
+	if truncated {
+		log.Printf("anthropic: reply truncated by max_tokens cap (%d) — stop_reason=%q", defaultMaxTokens, parsed.StopReason)
+	}
+	return ChatResult{Content: text, ToolCalls: calls, TokensIn: parsed.Usage.InputTokens, TokensOut: parsed.Usage.OutputTokens, Truncated: truncated}, nil
 }
 
 type anthropicStreamEvent struct {
-	Type  string `json:"type"`
-	Index int    `json:"index"`
-	// ContentBlock is only present on a content_block_start event — it
-	// announces what kind of block is starting at Index (and, for a
-	// tool_use block, the call's id/name up front; its arguments arrive
-	// afterward as a run of input_json_delta events on the same index).
+	Type         string `json:"type"`
+	Index        int    `json:"index"`
 	ContentBlock struct {
-		Type string `json:"type"` // "text" or "tool_use"
+		Type string `json:"type"` // "text" or "tool_use" — only set on content_block_start
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	} `json:"content_block"`
 	Delta struct {
 		Type string `json:"type"` // "text_delta" or "input_json_delta"
 		Text string `json:"text"`
-		// PartialJSON is one fragment of a tool_use block's arguments —
-		// concatenating every input_json_delta for a given Index yields
-		// that call's complete, validly-parseable JSON object exactly
-		// once content_block_stop fires for it.
+		// PartialJSON is one fragment of a tool_use block's "input" object,
+		// streamed as raw (not necessarily individually valid) JSON text —
+		// see the accumulation loop in ChatStream below.
 		PartialJSON string `json:"partial_json"`
+		// StopReason is only present on a "message_delta" event's delta
+		// object (a differently-shaped object than the text/input_json
+		// delta above, but decoded into this same struct — unset fields
+		// simply stay zero-valued on events that don't carry them). See
+		// anthropicResponse.StopReason's doc comment for what "max_tokens"
+		// means here.
+		StopReason string `json:"stop_reason"`
 	} `json:"delta"`
 	Usage   anthropicUsage `json:"usage"`
 	Message struct {
 		Usage anthropicUsage `json:"usage"`
 	} `json:"message"`
-}
-
-// anthropicStreamBlock tracks one in-progress content block by its stream
-// index between content_block_start and content_block_stop — Anthropic
-// interleaves blocks by index rather than sending each one as a single
-// atomic unit, so a tool call's name/id (known at content_block_start)
-// and its arguments (assembled from possibly many input_json_delta
-// fragments) have to be correlated across several events before they can
-// become one ToolCall.
-type anthropicStreamBlock struct {
-	kind  string // "text" or "tool_use"
-	id    string
-	name  string
-	input strings.Builder
 }
 
 func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest, onDelta func(string)) (ChatResult, error) {
@@ -262,7 +328,16 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest, onDel
 	}
 
 	var result ChatResult
-	blocks := map[int]*anthropicStreamBlock{}
+	// pendingCalls/argBuf accumulate a tool_use block across its
+	// content_block_start (ID/Name arrive here) and one-or-more
+	// content_block_delta input_json_delta events (Input arrives in
+	// fragments — Anthropic streams a tool call's arguments the same
+	// incremental way it streams text), keyed by the block's Index so
+	// multiple tool_use blocks in one response never interleave into each
+	// other's buffers. Finalized into a ToolCall on that block's
+	// content_block_stop.
+	pendingCalls := map[int]*ToolCall{}
+	argBuf := map[int]*strings.Builder{}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -275,35 +350,40 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest, onDel
 		}
 		switch evt.Type {
 		case "content_block_start":
-			blocks[evt.Index] = &anthropicStreamBlock{kind: evt.ContentBlock.Type, id: evt.ContentBlock.ID, name: evt.ContentBlock.Name}
+			if evt.ContentBlock.Type == "tool_use" {
+				pendingCalls[evt.Index] = &ToolCall{ID: evt.ContentBlock.ID, Name: evt.ContentBlock.Name}
+				argBuf[evt.Index] = &strings.Builder{}
+			}
 		case "content_block_delta":
 			switch evt.Delta.Type {
-			case "text_delta":
+			case "input_json_delta":
+				if buf, ok := argBuf[evt.Index]; ok {
+					buf.WriteString(evt.Delta.PartialJSON)
+				}
+			default:
 				if evt.Delta.Text != "" {
 					result.Content += evt.Delta.Text
 					onDelta(evt.Delta.Text)
 				}
-			case "input_json_delta":
-				// Never forwarded to onDelta — a tool call's arguments are
-				// structured data for ToolCalls, not chat text, and only
-				// become valid JSON once every fragment has arrived.
-				if b := blocks[evt.Index]; b != nil {
-					b.input.WriteString(evt.Delta.PartialJSON)
-				}
 			}
 		case "content_block_stop":
-			if b := blocks[evt.Index]; b != nil && b.kind == "tool_use" {
-				args := b.input.String()
-				if args == "" {
-					args = "{}"
-				}
-				result.ToolCalls = append(result.ToolCalls, ToolCall{ID: b.id, Name: b.name, Arguments: json.RawMessage(args)})
+			if call, ok := pendingCalls[evt.Index]; ok {
+				call.Arguments = json.RawMessage(argBuf[evt.Index].String())
+				result.ToolCalls = append(result.ToolCalls, *call)
+				delete(pendingCalls, evt.Index)
+				delete(argBuf, evt.Index)
 			}
-			delete(blocks, evt.Index)
 		case "message_start":
 			result.TokensIn = evt.Message.Usage.InputTokens
 		case "message_delta":
 			result.TokensOut = evt.Usage.OutputTokens
+			// See Chat's identical check above — the streaming counterpart
+			// arrives here instead of a top-level response field, on the
+			// final message_delta event.
+			if evt.Delta.StopReason == "max_tokens" {
+				result.Truncated = true
+				log.Printf("anthropic: streamed reply truncated by max_tokens cap (%d) — stop_reason=%q", defaultMaxTokens, evt.Delta.StopReason)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
