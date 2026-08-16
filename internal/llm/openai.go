@@ -30,6 +30,11 @@ type openAIChatRequest struct {
 	Messages []openAIMessage `json:"messages"`
 	Stream   bool            `json:"stream,omitempty"`
 	Tools    []openAITool    `json:"tools,omitempty"`
+	// MaxTokens is omitted entirely (via omitempty, letting the API apply
+	// its own default) unless the caller set ChatRequest.MaxTokens
+	// explicitly. Every pre-existing caller leaves MaxTokens at 0, so this
+	// field being new changes nothing for them.
+	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
 // openAITool is OpenAI's wire shape for one offered tool: a nested
@@ -229,7 +234,7 @@ func (c *OpenAIClient) newRequest(ctx context.Context, body []byte) (*http.Reque
 }
 
 func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, error) {
-	body, err := json.Marshal(openAIChatRequest{Model: req.Model, Messages: toOpenAIMessages(req.Messages), Tools: toOpenAITools(req.Tools)})
+	body, err := json.Marshal(openAIChatRequest{Model: req.Model, Messages: toOpenAIMessages(req.Messages), Tools: toOpenAITools(req.Tools), MaxTokens: req.MaxTokens})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -293,7 +298,7 @@ type openAIStreamChunk struct {
 }
 
 func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest, onDelta func(string)) (ChatResult, error) {
-	body, err := json.Marshal(openAIChatRequest{Model: req.Model, Messages: toOpenAIMessages(req.Messages), Stream: true, Tools: toOpenAITools(req.Tools)})
+	body, err := json.Marshal(openAIChatRequest{Model: req.Model, Messages: toOpenAIMessages(req.Messages), Stream: true, Tools: toOpenAITools(req.Tools), MaxTokens: req.MaxTokens})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}

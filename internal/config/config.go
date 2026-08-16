@@ -120,6 +120,11 @@ type Config struct {
 	// scripts/build-release.sh), surfaced by GET /api/health for the
 	// dashboard footer. Defaults to "dev" for local builds.
 	Version string
+	// Commit is the short git commit hash this binary was built from (set
+	// via -ldflags alongside Version) — Settings' Backend Health panel
+	// (Section 10). Defaults to "unknown" for a build that didn't set it,
+	// never a fabricated hash.
+	Commit string
 }
 
 // Load builds a Config from environment variables, falling back to

@@ -313,6 +313,18 @@ func (s *Server) Router() http.Handler {
 			r.Put("/", s.handleUpdateSettings)
 			r.Post("/test-connection", s.handleTestConnection)
 			r.Get("/ollama-models", s.handleOllamaModels)
+
+			// RC5: the Settings control-center subsystem — real provider
+			// diagnostics (Sections 1-3, 6), connection history (7),
+			// performance (5), one-click model pull (9), config
+			// validation (8), and backend health (10). See
+			// diagnostics_handlers.go/backend_health.go.
+			r.Post("/diagnostics", s.handleProviderDiagnostics)
+			r.Get("/diagnostics/history", s.handleDiagnosticsHistory)
+			r.Get("/performance", s.handleProviderPerformance)
+			r.Post("/ollama-pull", s.handleOllamaPull)
+			r.Post("/validate", s.handleValidateSettings)
+			r.Get("/backend-health", s.handleBackendHealth)
 		})
 
 		r.Route("/collections", func(r chi.Router) {

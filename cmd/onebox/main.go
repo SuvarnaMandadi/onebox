@@ -20,6 +20,14 @@ import (
 // scripts/build-release.sh.
 var version = "dev"
 
+// commit is the short git commit hash this binary was built from, set at
+// build time via -ldflags "-X main.commit=...". Left at its zero value
+// ("unknown") for any build that doesn't set it (a plain `go build`,
+// most local dev builds) — Settings' Backend Health panel (Section 10)
+// shows "unknown" honestly rather than fabricating a hash for a build
+// that has no real one to report.
+var commit = "unknown"
+
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		log.Println("onebox " + version)
@@ -64,6 +72,7 @@ func warnIfDefaultJWTSecret(cfg config.Config) {
 func run() error {
 	cfg := config.Load()
 	cfg.Version = version
+	cfg.Commit = commit
 	log.Printf("onebox %s starting", version)
 	warnIfDefaultJWTSecret(cfg)
 

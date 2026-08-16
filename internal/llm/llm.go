@@ -112,6 +112,15 @@ type ChatRequest struct {
 	// chatbot's full (non-greeting) turn populates this — see
 	// answerChatbotQuestion and actionToolDefs.
 	Tools []Tool
+	// MaxTokens caps the reply length for this one request. 0 (the
+	// overwhelming common case) means "use the provider client's own
+	// default" (see defaultMaxTokens in anthropic.go/openai.go) — set
+	// explicitly by provider-diagnostics deep checks (see
+	// internal/server/diagnostics_openai_compat.go), which want the
+	// smallest real reply a provider will accept, to prove the endpoint
+	// works end-to-end at the lowest possible cost against a paid
+	// account.
+	MaxTokens int
 }
 
 // ChatTiming is optional, provider-specific sub-request timing detail —

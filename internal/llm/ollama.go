@@ -181,9 +181,105 @@ func (c *OllamaClient) newRequest(ctx context.Context, body []byte) (*http.Reque
 }
 
 type ollamaTagsResponse struct {
-	Models []struct {
-		Name string `json:"name"`
-	} `json:"models"`
+	Models []ollamaTagModel `json:"models"`
+}
+
+// ollamaTagModel is one entry in GET /api/tags — the full shape modern
+// Ollama daemons (0.4+) return, not just the name. Details/Capabilities
+// come straight from the daemon's own model registry metadata (read off
+// the GGUF file's own metadata at pull time), never computed or guessed
+// by this codebase — see ListModelsDetailed's doc comment for exactly
+// which fields are missing on an older daemon and how that's handled.
+type ollamaTagModel struct {
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	Details struct {
+		Family            string   `json:"family"`
+		Families          []string `json:"families"`
+		ParameterSize     string   `json:"parameter_size"`
+		QuantizationLevel string   `json:"quantization_level"`
+		ContextLength     int      `json:"context_length"`
+		EmbeddingLength   int      `json:"embedding_length"`
+	} `json:"details"`
+	// Capabilities is the daemon's own authoritative list — typically a
+	// subset of "completion", "tools", "embedding", "vision", "insert" —
+	// present on Ollama 0.5+. Empty (not absent-vs-present distinguishable
+	// in Go's zero value) on older daemons; ListModelsDetailed's caller
+	// must not treat an empty slice here as "this model has zero
+	// capabilities," only as "this daemon version doesn't report them."
+	Capabilities []string `json:"capabilities"`
+}
+
+// OllamaModelDetail is ListModelsDetailed's per-model result — the
+// provider-agnostic shape the server package's diagnostics turn into
+// modelInfo. CapabilitiesKnown distinguishes "this daemon reported an
+// empty capabilities list" (impossible in practice, but handled
+// correctly) from "this daemon predates the capabilities field entirely,"
+// which ListModelsDetailed sets by checking whether ANY model in the
+// response carried a non-empty Capabilities — a per-request daemon
+// version fact, not a per-model one.
+type OllamaModelDetail struct {
+	Name              string
+	SizeBytes         int64
+	Family            string
+	Families          []string
+	ParameterSize     string
+	QuantizationLevel string
+	ContextLength     int
+	EmbeddingLength   int
+	Capabilities      []string
+	CapabilitiesKnown bool
+}
+
+// ListModelsDetailed is ListModels' full-detail sibling — used by the
+// provider diagnostics panel (Section 2 "Model Discovery"), which needs
+// real size/quantization/context-length/capability data, not just names.
+// Reuses the exact same GET /api/tags call ListModels makes (no second,
+// heavier endpoint) — the daemon already returns this detail in the same
+// response; ListModels just used to discard it.
+func (c *OllamaClient) ListModelsDetailed(ctx context.Context) ([]OllamaModelDetail, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/tags", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama returned status %d listing models", resp.StatusCode)
+	}
+
+	var parsed ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("decode tags response: %w", err)
+	}
+
+	capsKnown := false
+	for _, m := range parsed.Models {
+		if len(m.Capabilities) > 0 {
+			capsKnown = true
+			break
+		}
+	}
+
+	out := make([]OllamaModelDetail, len(parsed.Models))
+	for i, m := range parsed.Models {
+		out[i] = OllamaModelDetail{
+			Name:              m.Name,
+			SizeBytes:         m.Size,
+			Family:            m.Details.Family,
+			Families:          m.Details.Families,
+			ParameterSize:     m.Details.ParameterSize,
+			QuantizationLevel: m.Details.QuantizationLevel,
+			ContextLength:     m.Details.ContextLength,
+			EmbeddingLength:   m.Details.EmbeddingLength,
+			Capabilities:      m.Capabilities,
+			CapabilitiesKnown: capsKnown,
+		}
+	}
+	return out, nil
 }
 
 // ListModels reports the tags (e.g. "llama3.2:3b") of every model
@@ -298,6 +394,142 @@ func (c *OllamaClient) Version(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("decode version response: %w", err)
 	}
 	return parsed.Version, nil
+}
+
+type ollamaGenerateRequest struct {
+	Model   string           `json:"model"`
+	Prompt  string           `json:"prompt"`
+	Stream  bool             `json:"stream"`
+	Options ollamaGenOptions `json:"options,omitempty"`
+}
+
+// ollamaGenOptions bounds a diagnostic generate call to a handful of
+// tokens — this is a real generation (it costs the same wall-clock
+// warmup a normal request would if the model isn't already loaded), not
+// a free reachability ping, so keeping it small matters: NumPredict caps
+// how much it actually generates.
+type ollamaGenOptions struct {
+	NumPredict int `json:"num_predict"`
+}
+
+type ollamaGenerateResponse struct {
+	Response string `json:"response"`
+	Done     bool   `json:"done"`
+	Error    string `json:"error"`
+}
+
+// Generate makes one real, bounded (maxTokens) call to POST
+// /api/generate — used by provider diagnostics (Section 3's "Generate
+// endpoint works" check) to prove the endpoint actually produces text
+// for the given model, not just that the daemon is reachable. Always
+// non-streaming: the caller only needs pass/fail plus latency, not the
+// text itself token-by-token.
+func (c *OllamaClient) Generate(ctx context.Context, model, prompt string, maxTokens int) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = 1
+	}
+	body, err := json.Marshal(ollamaGenerateRequest{Model: model, Prompt: prompt, Stream: false, Options: ollamaGenOptions{NumPredict: maxTokens}})
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("generate request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var parsed ollamaGenerateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", fmt.Errorf("decode generate response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if parsed.Error != "" {
+			return "", fmt.Errorf("ollama error: %s", parsed.Error)
+		}
+		return "", fmt.Errorf("ollama returned status %d", resp.StatusCode)
+	}
+	return parsed.Response, nil
+}
+
+// OllamaPullProgress is one line of POST /api/pull's streamed NDJSON
+// progress — Ollama's own real download status, relayed as-is (never
+// synthesized) to whoever asked for the pull. Total/Completed are byte
+// counts; both are 0 before the daemon has resolved the manifest.
+type OllamaPullProgress struct {
+	Status    string `json:"status"`
+	Digest    string `json:"digest,omitempty"`
+	Total     int64  `json:"total,omitempty"`
+	Completed int64  `json:"completed,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type ollamaPullRequest struct {
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
+}
+
+// Pull streams POST /api/pull's real download progress to onProgress as
+// it arrives, one call per NDJSON line the daemon writes — Section 9's
+// "Pull model" one-click fix. Returns once the daemon reports the pull
+// finished (a line with Status "success") or failed; the caller (see
+// diagnostics_handlers.go's SSE relay) is responsible for forwarding each
+// call on to the actual HTTP client watching the pull, so an operator
+// sees the same real progress `ollama pull` itself would show, not a
+// fake progress bar.
+func (c *OllamaClient) Pull(ctx context.Context, model string, onProgress func(OllamaPullProgress)) error {
+	body, err := json.Marshal(ollamaPullRequest{Model: model, Stream: true})
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/pull", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Pulling a multi-gigabyte model can legitimately take minutes; this
+	// call must not inherit the short diagnostic-check timeout other
+	// methods on this client are typically used with (see
+	// diagnostics_handlers.go, which gives Pull its own long-lived
+	// client/context rather than httpTestClient's 8s budget).
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("pull request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama returned status %d starting pull", resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var p OllamaPullProgress
+		if err := json.Unmarshal(line, &p); err != nil {
+			continue
+		}
+		if onProgress != nil {
+			onProgress(p)
+		}
+		if p.Error != "" {
+			return fmt.Errorf("ollama pull error: %s", p.Error)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read pull stream: %w", err)
+	}
+	return nil
 }
 
 func (c *OllamaClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, error) {

@@ -12,6 +12,11 @@ mkdir -p "$OUT_DIR"
 
 export CGO_ENABLED=0
 
+# Best-effort: a source tarball / shallow clone without .git still builds
+# fine, just reporting "unknown" for the commit (see main.go's commit
+# var doc comment) rather than failing the whole release build.
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
 targets=(
   "windows amd64 .exe"
   "linux   amd64 "
@@ -24,7 +29,7 @@ for target in "${targets[@]}"; do
   read -r goos goarch ext <<< "$target"
   name="onebox-${VERSION}-${goos}-${goarch}${ext}"
   echo "building $name..."
-  GOOS="$goos" GOARCH="$goarch" go build -ldflags "-s -w -X main.version=$VERSION" -o "$OUT_DIR/$name" ./cmd/onebox
+  GOOS="$goos" GOARCH="$goarch" go build -ldflags "-s -w -X main.version=$VERSION -X main.commit=$COMMIT" -o "$OUT_DIR/$name" ./cmd/onebox
 done
 
 echo "checksums..."

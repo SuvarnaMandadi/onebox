@@ -14,6 +14,17 @@ import (
 
 const defaultMaxTokens = 1024
 
+// resolveMaxTokens returns requested if the caller set an explicit
+// per-request cap (ChatRequest.MaxTokens), else the client's own
+// default — shared by Chat/ChatStream so both respect an explicit
+// override identically.
+func resolveMaxTokens(requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	return defaultMaxTokens
+}
+
 // AnthropicClient calls the Anthropic Messages API.
 type AnthropicClient struct {
 	BaseURL string
@@ -221,7 +232,7 @@ func (c *AnthropicClient) newRequest(ctx context.Context, body []byte) (*http.Re
 
 func (c *AnthropicClient) Chat(ctx context.Context, req ChatRequest) (ChatResult, error) {
 	system, messages := splitSystem(req.Messages)
-	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: defaultMaxTokens, Messages: messages, Tools: toAnthropicTools(req.Tools)})
+	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: resolveMaxTokens(req.MaxTokens), Messages: messages, Tools: toAnthropicTools(req.Tools)})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -302,7 +313,7 @@ type anthropicStreamEvent struct {
 
 func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest, onDelta func(string)) (ChatResult, error) {
 	system, messages := splitSystem(req.Messages)
-	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: defaultMaxTokens, Messages: messages, Stream: true, Tools: toAnthropicTools(req.Tools)})
+	body, err := json.Marshal(anthropicRequest{Model: req.Model, System: system, MaxTokens: resolveMaxTokens(req.MaxTokens), Messages: messages, Stream: true, Tools: toAnthropicTools(req.Tools)})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("marshal request: %w", err)
 	}
